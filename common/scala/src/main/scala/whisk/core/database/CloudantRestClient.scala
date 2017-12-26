@@ -1,11 +1,12 @@
 /*
- * Copyright 2015-2016 IBM Corporation
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -29,11 +30,13 @@ import whisk.common.Logging
  * This class only handles the basic communication to the proper endpoints
  *  ("JSON in, JSON out"). It is up to its clients to interpret the results.
  */
-class CloudantRestClient(host: String, port: Int, username: String, password: String, db: String)(implicit system: ActorSystem, logging: Logging)
+class CloudantRestClient(host: String, port: Int, username: String, password: String, db: String)(
+  implicit system: ActorSystem,
+  logging: Logging)
     extends CouchDbRestClient("https", host, port, username, password, db) {
 
-    // https://cloudant.com/blog/cloudant-query-grows-up-to-handle-ad-hoc-queries/#.VvllCD-0z2C
-    def simpleQuery(doc: JsObject): Future[Either[StatusCode, JsObject]] = {
-        requestJson[JsObject](mkJsonRequest(HttpMethods.POST, uri(db, "_find"), doc))
-    }
+  // https://cloudant.com/blog/cloudant-query-grows-up-to-handle-ad-hoc-queries/#.VvllCD-0z2C
+  def simpleQuery(doc: JsObject): Future[Either[StatusCode, JsObject]] = {
+    requestJson[JsObject](mkJsonRequest(HttpMethods.POST, uri(db, "_find"), doc))
+  }
 }

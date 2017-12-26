@@ -1,27 +1,31 @@
 #!/usr/bin/env python
+"""Executable Python script for checking log (entries) sizes.
 
-#
-# Copyright 2015-2016 IBM Corporation
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
+CI/CD tool to assert that logs and databases are in certain bounds.
+
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+"""
 
 ##
 # CI/CD tool to assert that logs and databases are in certain bounds
 ##
 
 import collections
-import fnmatch
 import itertools
 import os
 import platform
@@ -87,7 +91,7 @@ if __name__ == "__main__":
         ("db-rules.log", [ partial(database_has_at_most_x_entries, 0) ]),
         ("db-triggers.log", [ partial(database_has_at_most_x_entries, 0) ]),
         # Assert that stdout of the container is correctly piped and empty
-        ("controller.log", [ partial(file_has_at_most_x_bytes, 0) ]),
+        ("controller0.log", [ partial(file_has_at_most_x_bytes, 0) ]),
         ("invoker0.log", [ partial(file_has_at_most_x_bytes, 0) ])
     ]
 
@@ -123,5 +127,5 @@ if __name__ == "__main__":
         sys.stderr.write(col.red(message) + "\n")
         sys.exit(1)
     else:
-        print col.green("All checks passed.")
+        print(col.green("All checks passed."))
         sys.exit(0)

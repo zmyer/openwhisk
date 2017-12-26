@@ -1,22 +1,22 @@
 # Build helper scripts
 
 This directory contains the following utilities.
-- `scanCode.py`: checks all code for conformance with respect to certain conventions,
+- `scanCode.py`: checks all code for conformance with respect to certain conventions.
+   - Please note that this utility has been moved to the incubator-openwhisk-utilities repository so that all Apache OpenWhisk repositories may more easily reference it. This version will be removed once all other repositories in the project correctly reference it in its new location.
 - `redo`: a wrapper around Ansible and Gradle commands, for which examples are given below,
 - `citool`: allows for command line monitoring of Jenkins and Travis CI builds.
-
 
 ## How to use `redo`
 
 The script is called `redo` because for most development, one will want to "redo" the compilation and deployment.
 
 - usage information: `redo -h`
-- initialize environment and `docker-machine` (for mac): `redo setup prereqs`
+- initialize environment and `docker-machine` (for mac): `redo setup prereq`
 - start CouchDB container and initialize DB with system and guest keys: `redo couchdb initdb`
 - build and deploy system: `redo deploy`
 - run tests: `redo props tests`
 
-To do a fresh build and deploy all with one line for a first time run `redo setup prereqs couchdb initdb deploy tests` as each of these is executed sequentially.
+To do a fresh build and deploy all with one line for a first time run `redo setup prereq couchdb initdb deploy tests` as each of these is executed sequentially.
 
 Individual components such as the `controller` may be rebuilt and redeployed as well.
 
@@ -30,7 +30,7 @@ For example, the following is handy to run a subset of all tests from the comman
 
   * `redo tests -a '--tests package.name.TestClass.evenMethodName'`
 
-## How to use `citool` 
+## How to use `citool`
 
 This script allows for monitoring of ongoing Jenkins and Travis builds.
 The script assumes by default that the monitored job is a Travis CI build hosted here `https://api.travis-ci.org/`.

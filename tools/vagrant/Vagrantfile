@@ -8,8 +8,7 @@
 # Don't use vagrant resume, it will run the provisioning a second producing errors
 # Use vagrant suspend and vagrant up (using up it skips provisioning)
 
-BOX = "ubuntu/trusty64-2"
-BOX_URL =  "https://cloud-images.ubuntu.com/vagrant/trusty/current/trusty-server-cloudimg-amd64-vagrant-disk1.box"
+BOX = "ubuntu/trusty64"
 BOX_MEMORY = ENV['BOX_MEMORY'] || '4096'
 BOX_CPUS = ENV['BOX_CPUS'] || '4'
 MACHINE_IP = ENV['MACHINE_IP'] || '192.168.33.13'
@@ -17,10 +16,8 @@ OW_DB = if ENV['OW_DB'] =~ (/^(cloudant|couchdb)$/i) then true else false end
 
 Vagrant.configure('2') do |config|
   config.vm.box = BOX
-  config.vm.box_url = BOX_URL
-
   config.vm.network :private_network, ip: MACHINE_IP
-  
+
   # If true, then any SSH connections made will enable agent forwarding.
   # Default value: false
   config.ssh.forward_agent = true
@@ -34,7 +31,7 @@ Vagrant.configure('2') do |config|
     vb.customize ['modifyvm', :id, '--ostype', 'Ubuntu_64']
     vb.customize ['modifyvm', :id, '--memory', BOX_MEMORY]
   end
-  
+
   # Shared root of repository; do not use symlinks
   config.vm.synced_folder '../../', '/home/vagrant/openwhisk'
 
@@ -43,16 +40,18 @@ Vagrant.configure('2') do |config|
     s.privileged = false
     s.inline = "sudo sed -i '/tty/!s/mesg n/tty -s \\&\\& mesg n/' /root/.profile"
   end
-  
+
   # Install Software
 $script_common = <<SCRIPT
   set -e
   set -x
+  echo "`date`: ubuntu-setup-start" >> /tmp/vagrant-times.txt
   sudo add-apt-repository ppa:git-core/ppa
+  sudo rm -rfv /var/lib/apt/lists/* && sed -i 's/# \(.*multiverse$\)/\1/g' /etc/apt/sources.list
   sudo apt-get update
   sudo apt-get install git -y
   sudo apt-get install htop
-  
+
   # Configure swapfile
   echo 'swapfile not found. Adding swapfile.'
   fallocate -l 8000M /swapfile
@@ -75,10 +74,11 @@ $script_common = <<SCRIPT
   cd /home/vagrant/openwhisk
   cd tools/ubuntu-setup
   su vagrant -c 'source all.sh'
+  echo "`date`: ubuntu-setup-end" >> /tmp/vagrant-times.txt
 SCRIPT
 
   config.vm.provision "script_common", type: "shell", keep_color: true, inline: $script_common
-   
+
   # Configure Custom Database
 $script_db = <<SCRIPT
 export ANSIBLE_REMOTE_TEMP=/home/vagrant/openwhisk/ansible/tmp
@@ -104,11 +104,13 @@ SCRIPT
 
   # Configure Default CouchDB
 $couch_db = <<COUCH_DB
+echo "`date`: couchdb-setup-start" >> /tmp/vagrant-times.txt
 export ANSIBLE_REMOTE_TEMP=/home/vagrant/openwhisk/ansible/tmp
 cd /home/vagrant/openwhisk/ansible
 su vagrant -c 'ansible-playbook -i environments/local setup.yml'
 su vagrant -c 'ansible-playbook -i environments/local prereq.yml'
 su vagrant -c 'ansible-playbook -i environments/local couchdb.yml'
+echo "`date`: couchdb-setup-end" >> /tmp/vagrant-times.txt
 COUCH_DB
 
 $init_db = <<INIT_DB
@@ -116,7 +118,7 @@ export ANSIBLE_REMOTE_TEMP=/home/vagrant/openwhisk/ansible/tmp
 cd /home/vagrant/openwhisk/ansible
 su vagrant -c 'ansible-playbook -i environments/local initdb.yml'
 INIT_DB
-  
+
   if OW_DB
     config.vm.provision "script_db", type: "shell", keep_color: true, inline: $script_db
   else
@@ -128,39 +130,41 @@ INIT_DB
 $script_end = <<SCRIPT
   set -e
   set -x
-
+  echo "`date`: build-start" >> /tmp/vagrant-times.txt
   HOME=/home/vagrant
   source /etc/environment
   # Build OpenWhisk using gradle
   cd ${OPENWHISK_HOME}
-  su vagrant -c './gradlew distDocker --parallel'
+  su vagrant -c './gradlew  distDocker'
 
+  echo "`date`: deploy-start" >> /tmp/vagrant-times.txt
   # Deploy OpenWhisk using ansible
   cd ${ANSIBLE_HOME}
   su vagrant -c 'ansible-playbook -i environments/local wipe.yml'
   su vagrant -c 'ansible-playbook -i environments/local apigateway.yml'
   su vagrant -c 'ansible-playbook -i environments/local openwhisk.yml'
   su vagrant -c 'ansible-playbook -i environments/local postdeploy.yml'
-  
+
   # Setup OpenWhisk CLI
   su vagrant -c 'mkdir ${HOME}/bin'
   su vagrant -c 'ln -s ${OPENWHISK_HOME}/tools/admin/wskadmin ${HOME}/bin/wskadmin'
   su vagrant -c 'ln -s ${OPENWHISK_HOME}/tools/build/redo ${HOME}/bin/wskdev'
-  echo ${OPENWHISK_HOME}/bin/linux/amd64/wsk -i '"$@"' > ${HOME}/bin/wsk
+  echo ${OPENWHISK_HOME}/bin/wsk -i '"$@"' > ${HOME}/bin/wsk
   chmod +x ${HOME}/bin/wsk
   chown vagrant:vagrant ${HOME}/bin/wsk
   PATH=${PATH}:${HOME}/bin
-  echo 'pushd "$(mktemp -d)" > /dev/null && wsk sdk install bashauto > /dev/null && source wsk_cli_bash_completion.sh && popd > /dev/null' >> $HOME/.bashrc
-  
+  echo 'eval "`wsk sdk install bashauto --stdout`"'>>${HOME}/.bashrc
+
   # Run OpenWhisk CLI
   touch $HOME/.wskprops
   chown -R vagrant:vagrant $HOME
-  # This allows user to see how to configure the wsk cli outside the VM 
-  wsk property set --apihost 192.168.33.13 --namespace guest --auth `cat ${ANSIBLE_HOME}/files/auth.guest`
-  wsk action invoke /whisk.system/utils/echo -p message hello --blocking --result
+  # This allows user to see how to configure the wsk cli outside the VM
+  wsk property set --apihost ${WHISK_IP} --namespace guest --auth `cat ${ANSIBLE_HOME}/files/auth.guest`
+  wsk action invoke /whisk.system/utils/echo -p message hello --result
+  echo "`date`: build-deploy-end" >> /tmp/vagrant-times.txt
 SCRIPT
 
-  config.vm.provision "script_end", type: "shell", keep_color: true, inline: $script_end
+  config.vm.provision "script_end", type: "shell", keep_color: true, inline: $script_end, env: {"WHISK_IP" => MACHINE_IP}
 
   if ENV['gui'] == 'true'
     # Install ubuntu-desktop and virtualbox additions

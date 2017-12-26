@@ -1,24 +1,27 @@
-/**
- * Copyright 2015-2016 IBM Corporation
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- *
- * Route management action common utilities
- *
- **/
-var request = require('request');
+ */
 
-/*
+/**
+ * Route management action common utilities
+ */
+var request = require('request');
+var utils2 = require('./apigw-utils.js');
+
+/**
  * Register a tenant with the API GW.
  * A new tenant is created for each unique namespace/tenantinstance.  If the
  * tenant already exists, the tenant is left as-is
@@ -34,6 +37,7 @@ var request = require('request');
 function createTenant(gwInfo, namespace, tenantInstance) {
   var instance = tenantInstance || 'openwhisk';  // Default to a fixed instance so all openwhisk tenants have a common instance
   var options = {
+    followAllRedirects: true,
     url: gwInfo.gwUrl+'/tenants',
     headers: {
       'Accept': 'application/json'
@@ -52,14 +56,13 @@ function createTenant(gwInfo, namespace, tenantInstance) {
     request.put(options, function(error, response, body) {
       var statusCode = response ? response.statusCode : undefined;
       console.log('addTenantToGateway: response status: '+ statusCode);
-      if (error) console.error('Warning: addTenantToGateway request failed: '+JSON.stringify(error));
-      if (body) console.log('addTenantToGateway: response body: '+JSON.stringify(body));
+      if (error) console.error('Warning: addTenantToGateway request failed: '+utils2.makeJsonString(error));
+      if (body) console.log('addTenantToGateway: response body: '+utils2.makeJsonString(body));
 
       if (error) {
-        console.error('addTenantToGateway: Unable to configure a tenant on the API Gateway: '+JSON.stringify(error));
-        reject('Unable to configure the API Gateway: '+JSON.stringify(error));
+        console.error('addTenantToGateway: Unable to configure a tenant on the API Gateway');
+        reject('Unable to configure the API Gateway: '+utils2.makeJsonString(error));
       } else if (statusCode != 200) {
-        console.error('addTenantToGateway: failure: response code: '+statusCode);
         if (body) {
           var errMsg = JSON.stringify(body);
           if (body.error && body.error.message) errMsg = body.error.message;
@@ -91,6 +94,7 @@ function getTenants(gwInfo, ns, tenantInstance) {
   var qs = qsNsOnly;
   if (tenantInstance) qs = qsNsAndInstance;
   var options = {
+    followAllRedirects: true,
     url: gwInfo.gwUrl+'/tenants',
     qs: qs,
     headers: {
@@ -106,13 +110,12 @@ function getTenants(gwInfo, ns, tenantInstance) {
     request.get(options, function(error, response, body) {
       var statusCode = response ? response.statusCode : undefined;
       console.log('getTenants: response status: '+ statusCode);
-      if (error) console.error('Warning: getTenant request failed: '+JSON.stringify(error));
-      if (body) console.log('getTenants: response body: '+body);
+      if (error) console.error('Warning: getTenant request failed: '+utils2.makeJsonString(error));
+      if (body) console.log('getTenants: response body: '+utils2.makeJsonString(body));
       if (error) {
-        console.error('getTenants: Unable to obtain tenant from the API Gateway: '+JSON.stringify(error));
-        reject('Unable to obtain Tenant from the API Gateway: '+JSON.stringify(error));
+        console.error('getTenants: Unable to obtain tenant from the API Gateway');
+        reject('Unable to obtain Tenant from the API Gateway: '+utils2.makeJsonString(error));
       } else if (statusCode != 200) {
-        console.error('getTenants: failure: response code: '+statusCode);
         if (body) {
           var errMsg = JSON.stringify(body);
           if (body.error && body.error.message) errMsg = body.error.message;
@@ -128,9 +131,7 @@ function getTenants(gwInfo, ns, tenantInstance) {
               resolve(bodyJson);
             } else {
               console.error('getTenants: Invalid API GW response body; a JSON array was not returned');
-              //FIXME MWD may happen when no tenants are found and {} is returned:  https://github.com/openwhisk/apigateway/issues/59
-              //FIXME MWD reject('Internal error. Invalid API Gateway response: Not an array');
-              resolve( [] );  // FIXME MWD Hack until https://github.com/openwhisk/apigateway/issues/59 is fixed
+              resolve( [] );
             }
           } catch(e) {
             console.error('getTenants: Invalid API GW response body; JSON.parse() failure: '+e);
@@ -175,6 +176,7 @@ function addApiToGateway(gwInfo, tenantId, swaggerApi, gwApiId) {
   gwApi.tenantId = tenantId;
 
   var options = {
+    followAllRedirects: true,
     url: gwInfo.gwUrl+'/apis',
     headers: {
       'Accept': 'application/json'
@@ -198,14 +200,13 @@ function addApiToGateway(gwInfo, tenantId, swaggerApi, gwApiId) {
     requestFcn(options, function(error, response, body) {
       var statusCode = response ? response.statusCode : undefined;
       console.log('addApiToGateway: response status:'+ statusCode);
-      if (error) console.error('Warning: addRouteToGateway request failed: '+ JSON.stringify(error));
-      if (body) console.log('addApiToGateway: response body: '+JSON.stringify(body));
+      if (error) console.error('Warning: addRouteToGateway request failed: '+ utils2.makeJsonString(error));
+      if (body) console.log('addApiToGateway: response body: '+utils2.makeJsonString(body));
 
       if (error) {
-        console.error('addApiToGateway: Unable to configure the API Gateway: '+JSON.stringify(error));
-        reject('Unable to configure the API Gateway: '+JSON.stringify(error));
+        console.error('addApiToGateway: Unable to configure the API Gateway');
+        reject('Unable to configure the API Gateway: '+utils2.makeJsonString(error));
       } else if (statusCode != 200) {
-        console.error('addApiToGateway: Response code: '+statusCode);
         if (body) {
           var errMsg = JSON.stringify(body);
           if (body.error && body.error.message) errMsg = body.error.message;
@@ -234,6 +235,7 @@ function addApiToGateway(gwInfo, tenantId, swaggerApi, gwApiId) {
  */
 function deleteApiFromGateway(gwInfo, gwApiId) {
   var options = {
+    followAllRedirects: true,
     url: gwInfo.gwUrl+'/apis/'+gwApiId,
     agentOptions: {rejectUnauthorized: false},
     headers: {
@@ -249,14 +251,13 @@ function deleteApiFromGateway(gwInfo, gwApiId) {
     request.delete(options, function(error, response, body) {
       var statusCode = response ? response.statusCode : undefined;
       console.log('deleteApiFromGateway: response status:'+ statusCode);
-      if (error) console.error('Warning: deleteGatewayApi request failed: '+ JSON.stringify(error));
-      if (body) console.log('deleteApiFromGateway: response body: '+JSON.stringify(body));
+      if (error) console.error('Warning: deleteGatewayApi request failed: '+ utils2.makeJsonString(error));
+      if (body) console.log('deleteApiFromGateway: response body: '+utils2.makeJsonString(body));
 
       if (error) {
-        console.error('deleteApiFromGateway: Unable to delete the API Gateway: '+JSON.stringify(error));
-        reject('Unable to delete the API Gateway: '+JSON.stringify(error));
+        console.error('deleteApiFromGateway: Unable to delete the API Gateway');
+        reject('Unable to delete the API Gateway: '+utils2.makeJsonString(error));
       } else if (statusCode != 200) {
-        console.error('deleteApiFromGateway: Response code: '+statusCode);
         if (body) {
           var errMsg = JSON.stringify(body);
           if (body.error && body.error.message) errMsg = body.error.message;
@@ -271,7 +272,7 @@ function deleteApiFromGateway(gwInfo, gwApiId) {
   });
 }
 
-/*
+/**
  * Return an array of APIs
  */
 function getApis(gwInfo, tenantId, bpOrApiName) {
@@ -288,6 +289,7 @@ function getApis(gwInfo, tenantId, bpOrApiName) {
     }
   }
   var options = {
+    followAllRedirects: true,
     url: gwInfo.gwUrl+'/tenants/'+tenantId+'/apis',
     headers: {
       'Accept': 'application/json'
@@ -305,13 +307,12 @@ function getApis(gwInfo, tenantId, bpOrApiName) {
     request.get(options, function(error, response, body) {
       var statusCode = response ? response.statusCode : undefined;
       console.log('getApis: response status: '+ statusCode);
-      if (error) console.error('Warning: getApis request failed: '+JSON.stringify(error));
-      if (body) console.log('getApis: response body: '+JSON.stringify(body));
+      if (error) console.error('Warning: getApis request failed: '+utils2.makeJsonString(error));
+      if (body) console.log('getApis: response body: '+utils2.makeJsonString(body));
       if (error) {
-        console.error('getApis: Unable to obtain API(s) from the API Gateway: '+JSON.stringify(error));
-        reject('Unable to obtain API(s) from the API Gateway: '+JSON.stringify(error));
+        console.error('getApis: Unable to obtain API(s) from the API Gateway');
+        reject('Unable to obtain API(s) from the API Gateway: '+utils2.makeJsonString(error));
       } else if (statusCode != 200) {
-        console.error('getApis: failure: response code: '+statusCode);
         if (body) {
           var errMsg = JSON.stringify(body);
           if (body.error && body.error.message) errMsg = body.error.message;
@@ -327,9 +328,7 @@ function getApis(gwInfo, tenantId, bpOrApiName) {
               resolve(bodyJson);
             } else {
               console.error('getApis: Invalid API GW response body; a JSON array was not returned');
-              //FIXME MWD may happen when no apis are found and {} is returned:  https://github.com/openwhisk/apigateway/issues/59
-              //FIXME MWD reject('Internal error. Invalid API Gateway response: Not an array');
-              resolve( [] );  // FIXME MWD Hack until https://github.com/openwhisk/apigateway/issues/59 is fixed
+              resolve( [] );
             }
           } catch(e) {
             console.error('getApis: Invalid API GW response body; JSON.parse() failure: '+e);
@@ -344,7 +343,7 @@ function getApis(gwInfo, tenantId, bpOrApiName) {
   });
 }
 
-/*
+/**
  * Convert API object array into specified format
  * Parameters:
  *  apis    : array of 0 or more APIs
@@ -374,7 +373,7 @@ function transformApis(apis, format) {
   return apisOutput;
 }
 
-/*
+/**
  * Convert API object into swagger JSON format
  * Parameters:
  *  gwApi  : API object as returned from the API Gateway
@@ -434,7 +433,7 @@ function generateSwaggerApiFromGwApi(gwApi) {
   return swaggerApi;
 }
 
-/*
+/**
  * Create a base swagger API object containing the API basepath, but no endpoints
  * Parameters:
  *   basepath   - Required. API basepath
@@ -455,7 +454,7 @@ function generateBaseSwaggerApi(basepath, apiname) {
   return swaggerApi;
 }
 
-/*
+/**
  * Take an API in JSON swagger format and create an API GW compatible
  * API configuration JSON object
  * Parameters:
@@ -484,7 +483,7 @@ function generateGwApiFromSwaggerApi(swaggerApi) {
   return gwApi;
 }
 
-/*
+/**
  * Take an existing API in JSON swagger format, and update it with a single path/operation.
  * The addition can be an entirely new path or a new operation under an existing path.
  * Parameters:
@@ -587,7 +586,7 @@ function addEndpointToSwaggerApi(swaggerApi, endpoint) {
   return swaggerApi;
 }
 
-/*
+/**
  * Update an existing DB API document by removing the specified relpath/operation section.
  *   swaggerApi - API from which to remove the specified endpoint.  This object will be updated.
  *   endpoint   - JSON object describing new path/operation.  Required fields
@@ -640,7 +639,8 @@ function confidentialPrint(str) {
     return printStr;
 }
 
-/* Create the CLI response payload from an array of GW API objects
+/**
+ * Create the CLI response payload from an array of GW API objects
  * Parameters:
  *  gwApis    - Array of JSON GW API objects
  * Returns:
@@ -659,7 +659,8 @@ function generateCliResponse(gwApis) {
   return respApis;
 }
 
-/* Use the specified GW API object to create an API JSON object in for format the CLI expects.
+/**
+ * Use the specified GW API object to create an API JSON object in for format the CLI expects.
  * Parameters:
  *  gwApi      - JSON GW API object
  * Returns:
@@ -717,12 +718,45 @@ function getActionNameFromActionUrl(actionUrl) {
 
 /*
  * https://172.17.0.1/api/v1/namespaces/whisk.system/actions/getaction
- * would return /whisk.system
+ * would return whisk.system
  * https://my-host.mycompany.com/api/v1/namespaces/myid@gmail.com_dev/actions/mypkg/getaction
- * would return /myid@gmail.com_dev
+ * would return myid@gmail.com_dev
  */
 function getActionNamespaceFromActionUrl(actionUrl) {
   return parseActionUrl(actionUrl)[3];
+}
+
+/*
+ * Replace the namespace values that are used in the apidoc with the
+ * specified namespace
+ */
+function updateNamespace(apidoc, namespace) {
+  if (apidoc && namespace) {
+    if (apidoc.action) {
+      // The action namespace does not have to match the CLI user's namespace
+      // If it is different, leave it alone; otherwise use the replacement namespace
+      if (apidoc.namespace === apidoc.action.namespace) {
+        apidoc.action.namespace = namespace;
+        apidoc.action.backendUrl = replaceNamespaceInUrl(apidoc.action.backendUrl, namespace);      }
+    }
+    apidoc.namespace = namespace;
+  }
+}
+
+/*
+ * Take an OpenWhisk URL (i.e. action invocation URL) and replace the namespace
+ * path parameter value with the provided namespace value
+ */
+function replaceNamespaceInUrl(url, namespace) {
+  var namespacesPattern = /\/namespaces\/([\w@.-]+)\//;
+  console.log('replaceNamespaceInUrl: url before - '+url);
+  matchResult = url.match(namespacesPattern);
+  if (matchResult !== null) {
+    console.log('replaceNamespaceInUrl: replacing namespace \''+matchResult[1]+'\' with \''+namespace+'\'');
+    url = url.replace(namespacesPattern, '/namespaces/'+namespace+'/');
+  }
+  console.log('replaceNamespaceInUrl: url after - '+url);
+  return url;
 }
 
 module.exports.createTenant = createTenant;
@@ -739,3 +773,4 @@ module.exports.removeEndpointFromSwaggerApi = removeEndpointFromSwaggerApi;
 module.exports.confidentialPrint = confidentialPrint;
 module.exports.generateCliResponse = generateCliResponse;
 module.exports.generateCliApiFromGwApi = generateCliApiFromGwApi;
+module.exports.updateNamespace = updateNamespace;

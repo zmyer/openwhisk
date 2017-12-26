@@ -1,3 +1,0 @@
-ext.dockerImageName = 'pythonaction'
-apply from: '../../gradle/docker.gradle'
-distDocker.dependsOn ':core:actionProxy:distDocker'

@@ -19,7 +19,10 @@ You can create your own namespaces if you're entitled to do so. The `/whisk.syst
 ### Fully qualified names
 
 The fully qualified name of an entity is
-`/namespaceName[/packageName]/entityName`. Notice that `/` is used to delimit namespaces, packages, and entities. Also, namespaces must be prefixed with a `/`.
+`/namespaceName[/packageName]/entityName`. Notice that `/` is used to delimit namespaces, packages, and entities.
+
+If the fully qualified name has three parts:
+`/namespaceName/packageName/entityName`, then the namespace can be entered without a prefixed `/`; otherwise, namespaces must be prefixed with a `/`.
 
 For convenience, the namespace can be left off if it is the user's *default namespace*.
 
@@ -110,7 +113,7 @@ OpenWhisk JavaScript actions run in a Node.js runtime.
 
 Actions written in JavaScript must be confined to a single file. The file can contain multiple functions but by convention a function called `main` must exist and is the one called when the action is invoked. For example, the following is an example of an action with multiple functions.
 
-```
+```javascript
 function main() {
     return { payload: helper() }
 }
@@ -133,11 +136,11 @@ A JavaScript action's activation is **synchronous** if the main function exits u
 
 Here is an example of a synchronous action.
 
-```
+```javascript
 // an action in which each path results in a synchronous activation
 function main(params) {
   if (params.payload == 0) {
-     return;
+     return {};
   } else if (params.payload == 1) {
      return {payload: 'Hello, World!'};
   } else if (params.payload == 2) {
@@ -152,7 +155,7 @@ Start by instantiating a new Promise object and passing it a callback function. 
 
 The following is an example on how to fulfill a Promise by calling the resolve function.
 
-```
+```javascript
 function main(args) {
      return new Promise(function(resolve, reject) {
        setTimeout(function() {
@@ -164,7 +167,7 @@ function main(args) {
 
 The following is an example on how to reject a Promise by calling the reject function.
 
-```
+```javascript
 function main(args) {
      return new Promise(function(resolve, reject) {
        setTimeout(function() {
@@ -176,7 +179,7 @@ function main(args) {
 
 It is possible for an action to be synchronous on some inputs and asynchronous on others. The following is an example.
 
-```
+```javascript
   function main(params) {
       if (params.payload) {
          // asynchronous activation
@@ -194,220 +197,232 @@ It is possible for an action to be synchronous on some inputs and asynchronous o
 
 Notice that regardless of whether an activation is synchronous or asynchronous, the invocation of the action can be blocking or non-blocking.
 
-### JavaScript global whisk object deprecated
+### JavaScript global whisk object removed
 
-The global object `whisk` is currently deprecated; migrate your nodejs actions to use altenative methods.
+The global object `whisk` has been removed; migrate your nodejs actions to use alternative methods.
 For the functions `whisk.invoke()` and `whisk.trigger()` use the already installed client library [openwhisk](https://www.npmjs.com/package/openwhisk).
 For the `whisk.getAuthKey()` you can get the API key value from the environment variable `__OW_API_KEY`.
 For the `whisk.error()` you can return a rejected Promise (i.e. Promise.reject).
 
 ### JavaScript runtime environments
 
-JavaScript actions are executed by default in a Node.js version 6.9.1 environment.  The 6.9.1 environment will also be used for an action if the `--kind` flag is explicitly specified with a value of 'nodejs:6' when creating/updating the action.
-The following packages are available to be used in the Node.js 6.9.1 environment:
+JavaScript actions can be executed in Node.js version 6 or Node.js version 8.
+Currently actions are executed by default in a Node.js version 6.12.2 environment.  
 
-- apn v2.1.2
-- async v2.1.4
-- btoa v1.1.2
-- cheerio v0.22.0
-- cloudant v1.6.2
-- commander v2.9.0
-- consul v0.27.0
-- cookie-parser v1.4.3
-- cradle v0.7.1
-- errorhandler v1.5.0
-- glob v7.1.1
-- gm v1.23.0
-- lodash v4.17.2
-- log4js v0.6.38
-- iconv-lite v0.4.15
-- marked v0.3.6
-- merge v1.2.0
-- moment v2.17.0
-- mongodb v2.2.11
-- mustache v2.3.0
-- nano v6.2.0
-- node-uuid v1.4.7
-- nodemailer v2.6.4
-- oauth2-server v2.4.1
-- openwhisk v3.0.0
-- pkgcloud v1.4.0
-- process v0.11.9
-- pug v2.0.0-beta6
-- redis v2.6.3
-- request v2.79.0
-- request-promise v4.1.1
-- rimraf v2.5.4
-- semver v5.3.0
-- sendgrid v4.7.1
-- serve-favicon v2.3.2
-- socket.io v1.6.0
-- socket.io-client v1.6.0
-- superagent v3.0.0
-- swagger-tools v0.10.1
-- tmp v0.0.31
-- twilio v2.11.1
-- underscore v1.8.3
-- uuid v3.0.0
-- validator v6.1.0
-- watson-developer-cloud v2.9.0
-- when v3.7.7
-- winston v2.3.0
-- ws v1.1.1
-- xml2js v0.4.17
-- xmlhttprequest v1.8.0
-- yauzl v2.7.0
+### Node.js version 6 environment
+The Node.js 6.12.2 environment will be used for an action if the `--kind` flag is explicitly specified with a value of 'nodejs:6' when creating/updating the action.
 
-The Node.js version 0.12.17 environment will be used for an action if the `--kind` flag is explicitly specified with a value of 'nodejs' when creating/updating the action.
-The following packages are available to be used in the Node.js 0.12.17 environment:
+The following packages are available to be used in the Node.js 6.12.2 environment:
 
-**Note**: The Node.js version 0.12.x is deprecated, migrate all your Node.js action to use Node.js version 6.x.
+- [apn v2.1.2](https://www.npmjs.com/package/apn) - A Node.js module for interfacing with the Apple Push Notification service.
+- [async v2.1.4](https://www.npmjs.com/package/async) - Provides functions for working with asynchronous functions.
+- [btoa v1.1.2](https://www.npmjs.com/package/btoa) - A port of the browser's btoa function.
+- [cheerio v0.22.0](https://www.npmjs.com/package/cheerio) - Fast, flexible & lean implementation of core jQuery designed specifically for the server.
+- [cloudant v1.6.2](https://www.npmjs.com/package/cloudant) - This is the official Cloudant library for Node.js.
+- [commander v2.9.0](https://www.npmjs.com/package/commander) - The complete solution for Node.js command-line interfaces.
+- [consul v0.27.0](https://www.npmjs.com/package/consul) - A client for Consul, involving service discovery and configuration.
+- [cookie-parser v1.4.3](https://www.npmjs.com/package/cookie-parser) - Parse Cookie header and populate req.cookies with an object keyed by the cookie names.
+- [cradle v0.7.1](https://www.npmjs.com/package/cradle) - A high-level, caching, CouchDB client for Node.js.
+- [errorhandler v1.5.0](https://www.npmjs.com/package/errorhandler) - Development-only error handler middleware.
+- [glob v7.1.1](https://www.npmjs.com/package/glob) - Match files by using patterns that the shell uses, like stars and stuff.
+- [gm v1.23.0](https://www.npmjs.com/package/gm) - GraphicsMagick and ImageMagick for Node.
+- [lodash v4.17.2](https://www.npmjs.com/package/lodash) - The Lodash library exported as Node.js modules.
+- [log4js v0.6.38](https://www.npmjs.com/package/log4js) - A conversion of the log4js framework designed to work with Node.
+- [iconv-lite v0.4.15](https://www.npmjs.com/package/iconv-lite) - Pure JS character encoding conversion
+- [marked v0.3.6](https://www.npmjs.com/package/marked) - A full-featured markdown parser and compiler, which is written in JavaScript. Built for speed.
+- [merge v1.2.0](https://www.npmjs.com/package/merge) - Merge multiple objects into one, optionally creating a new cloned object.
+- [moment v2.17.0](https://www.npmjs.com/package/moment) - A lightweight JavaScript date library for parsing, validating, manipulating, and formatting dates.
+- [mongodb v2.2.11](https://www.npmjs.com/package/mongodb) - The official MongoDB driver for Node.js.
+- [mustache v2.3.0](https://www.npmjs.com/package/mustache) - Mustache.js is an implementation of the mustache template system in JavaScript.
+- [nano v6.2.0](https://www.npmjs.com/package/nano) - Minimalistic couchdb driver for Node.js.
+- [node-uuid v1.4.7](https://www.npmjs.com/package/node-uuid) - Deprecated UUID packaged.
+- [nodemailer v2.6.4](https://www.npmjs.com/package/nodemailer) - Send e-mails from Node.js – easy as cake!
+- [oauth2-server v2.4.1](https://www.npmjs.com/package/oauth2-server) - Complete, compliant, and well tested module for implementing an OAuth2 Server/Provider with express in Node.js.
+- [openwhisk v3.11.0](https://www.npmjs.com/package/openwhisk) - JavaScript client library for the OpenWhisk platform. Provides a wrapper around the OpenWhisk APIs.
+- [pkgcloud v1.4.0](https://www.npmjs.com/package/pkgcloud) - pkgcloud is a standard library for Node.js that abstracts away differences among multiple cloud providers.
+- [process v0.11.9](https://www.npmjs.com/package/process) - Require('process'); just like any other module.
+- [pug v2.0.0-beta6](https://www.npmjs.com/package/pug) - Implements the Pug templating language.
+- [redis v2.6.3](https://www.npmjs.com/package/redis) - This is a complete and feature-rich Redis client for Node.js.
+- [request v2.79.0](https://www.npmjs.com/package/request) - Request is the simplest way possible to make HTTP calls.
+- [request-promise v4.1.1](https://www.npmjs.com/package/request-promise) - The simplified HTTP request client 'request' with Promise support. Powered by Bluebird.
+- [rimraf v2.5.4](https://www.npmjs.com/package/rimraf) - The UNIX command rm -rf for node.
+- [semver v5.3.0](https://www.npmjs.com/package/semver) - Supports semantic versioning.
+- [sendgrid v4.7.1](https://www.npmjs.com/package/sendgrid) - Provides email support via the SendGrid API.
+- [serve-favicon v2.3.2](https://www.npmjs.com/package/serve-favicon) - Node.js middleware for serving a favicon.
+- [socket.io v1.6.0](https://www.npmjs.com/package/socket.io) - Socket.IO enables real-time bidirectional event-based communication.
+- [socket.io-client v1.6.0](https://www.npmjs.com/package/socket.io-client) - Client-side support for Socket.IO.
+- [superagent v3.0.0](https://www.npmjs.com/package/superagent) - SuperAgent is a small progressive client-side HTTP request library, and Node.js module with the same API, sporting many high-level HTTP client features.
+- [swagger-tools v0.10.1](https://www.npmjs.com/package/swagger-tools) - Tools that are related to working with Swagger, a way to document APIs.
+- [tmp v0.0.31](https://www.npmjs.com/package/tmp) - A simple temporary file and directory creator for node.js.
+- [twilio v2.11.1](https://www.npmjs.com/package/twilio) - A wrapper for the Twilio API, related to voice, video, and messaging.
+- [underscore v1.8.3](https://www.npmjs.com/package/underscore) - Underscore.js is a utility-belt library for JavaScript that supports the usual functional suspects (each, map, reduce, filter...) without extending any core JavaScript objects.
+- [uuid v3.0.0](https://www.npmjs.com/package/uuid) - Simple, fast generation of RFC4122 UUIDS.
+- [validator v6.1.0](https://www.npmjs.com/package/validator) - A library of string validators and sanitizers.
+- [watson-developer-cloud v2.29.0](https://www.npmjs.com/package/watson-developer-cloud) - Node.js client library to use the Watson Developer Cloud services, a collection of APIs that use cognitive computing to solve complex problems.
+- [when v3.7.7](https://www.npmjs.com/package/when) - When.js is a rock solid, battle-tested Promises/A+ and when() implementation, including a complete ES6 Promise shim.
+- [winston v2.3.0](https://www.npmjs.com/package/winston) - A multi-transport async logging library for node.js. "CHILL WINSTON! ... I put it in the logs."
+- [ws v1.1.1](https://www.npmjs.com/package/ws) - ws is a simple to use, blazing fast, and thoroughly tested WebSocket client and server implementation.
+- [xml2js v0.4.17](https://www.npmjs.com/package/xml2js) - Simple XML to JavaScript object converter. It supports bi-directional conversion.
+- [xmlhttprequest v1.8.0](https://www.npmjs.com/package/xmlhttprequest) - node-XMLHttpRequest is a wrapper for the built-in http client to emulate the browser XMLHttpRequest object.
+- [yauzl v2.7.0](https://www.npmjs.com/package/yauzl) - Yet another unzip library for node. For zipping.
 
-- apn v1.7.4
-- async v1.5.2
-- btoa v1.1.2
-- cheerio v0.20.0
-- cloudant v1.4.1
-- commander v2.7.0
-- consul v0.18.1
-- cookie-parser v1.3.4
-- cradle v0.6.7
-- errorhandler v1.3.5
-- gm v1.20.0
-- jade v1.9.2
-- log4js v0.6.38
-- merge v1.2.0
-- moment v2.8.1
-- mustache v2.1.3
-- nano v5.10.0
-- node-uuid v1.4.2
-- oauth2-server v2.4.0
-- openwhisk v3.0.0
-- process v0.11.0
-- request v2.79.0
-- rimraf v2.5.1
-- semver v4.3.6
-- serve-favicon v2.2.0
-- socket.io v1.3.5
-- socket.io-client v1.3.5
-- superagent v1.3.0
-- swagger-tools v0.8.7
-- tmp v0.0.28
-- watson-developer-cloud v1.4.1
-- when v3.7.3
-- ws v1.1.0
-- xml2js v0.4.15
-- xmlhttprequest v1.7.0
-- yauzl v2.3.1
+### Node.js version 8 environment
+The Node.js version 8.9.3 environment is used if the `--kind` flag is explicitly specified with a value of 'nodejs:8' when creating or updating an Action.
+
+The following packages are pre-installed in the Node.js version 8.9.3 environment:
+
+- [openwhisk v3.11.0](https://www.npmjs.com/package/openwhisk) - JavaScript client library for the OpenWhisk platform. Provides a wrapper around the OpenWhisk APIs.
+
+### Packaging npm packages with your actions
+For any `npm` packages that are not pre-installed in the Node.js environment, you can bundle them as dependencies when you create or update your action.
+
+For more information, see [Packaging an action as a Node.js module](./actions.md#packaging-an-action-as-a-nodejs-module) or [Packaging an action as a single bundle](./actions.md#packaging-an-action-as-a-single-bundle).
 
 ## Python actions
+OpenWhisk supports running Python actions using two different runtime versions.
 
-Python actions are executed by default using Python 2.7.12.
-In addition to the standard Python library, the following packages are also available for use by Python actions.
+### Python 3 actions
 
-- attrs v16.1.0
+Python 3 actions are executed using Python 3.6.1. To use this runtime, specify the `wsk` CLI parameter `--kind python:3` when creating or updating an action.
+The following packages are available for use by Python actions, in addition to the Python 3.6 standard libraries.
+
+- aiohttp v1.3.3
+- appdirs v1.4.3
+- asn1crypto v0.21.1
+- async-timeout v1.2.0
+- attrs v16.3.0
 - beautifulsoup4 v4.5.1
-- cffi v1.7.0
-- click v6.6
-- cryptography v1.5
-- cssselect v0.9.2
-- enum34 v1.1.6
-- flask v0.11.1
-- gevent v1.1.2
-- greenlet v0.4.10
+- cffi v1.9.1
+- chardet v2.3.0
+- click v6.7
+- cryptography v1.8.1
+- cssselect v1.0.1
+- Flask v0.12
+- gevent v1.2.1
+- greenlet v0.4.12
 - httplib2 v0.9.2
-- idna v2.1
-- ipaddress v1.0.16
+- idna v2.5
 - itsdangerous v0.24
-- jinja2 v2.8
+- Jinja2 v2.9.5
+- kafka-python v1.3.1
 - lxml v3.6.4
-- kafka_python v1.3.1
-- markupsafe v0.23
-- parsel v1.0.3
-- pyasn1 v0.1.9
+- MarkupSafe v1.0
+- multidict v2.1.4
+- packaging v16.8
+- parsel v1.1.0
+- pyasn1 v0.2.3
 - pyasn1-modules v0.0.8
-- pycparser v2.14
-- pydispatcher v2.0.5
-- pyopenssl v16.1.0
+- pycparser v2.17
+- PyDispatcher v2.0.5
+- pyOpenSSL v16.2.0
+- pyparsing v2.2.0
 - python-dateutil v2.5.3
 - queuelib v1.4.2
 - requests v2.11.1
-- scrapy v1.1.2
+- Scrapy v1.1.2
 - service-identity v16.0.0
 - simplejson v3.8.2
 - six v1.10.0
-- twisted v16.4.0
-- w3lib v1.15.0
-- werkzeug v0.11.10
-- zope.interface v4.3.1
+- Twisted v16.4.0
+- w3lib v1.17.0
+- Werkzeug v0.12
+- yarl v0.9.8
+- zope.interface v4.3.3
+
+### Python 2 actions
+
+Python 2 actions are executed using Python 2.7.12. This is the default runtime for Python actions, unless you specify the `--kind` flag when creating or updating an action. To explicitly select this runtime, use `--kind python:2`. The following packages are available for use by Python 2 actions, in addition to the Python 2.7 standard library.
+
+- appdirs v1.4.3
+- asn1crypto v0.21.1
+- attrs v16.3.0
+- beautifulsoup4 v4.5.1
+- cffi v1.9.1
+- click v6.7
+- cryptography v1.8.1
+- cssselect v1.0.1
+- enum34 v1.1.6
+- Flask v0.11.1
+- gevent v1.1.2
+- greenlet v0.4.12
+- httplib2 v0.9.2
+- idna v2.5
+- ipaddress v1.0.18
+- itsdangerous v0.24
+- Jinja2 v2.9.5
+- kafka-python v1.3.1
+- lxml v3.6.4
+- MarkupSafe v1.0
+- packaging v16.8
+- parsel v1.1.0
+- pyasn1 v0.2.3
+- pyasn1-modules v0.0.8
+- pycparser v2.17
+- PyDispatcher v2.0.5
+- pyOpenSSL v16.2.0
+- pyparsing v2.2.0
+- python-dateutil v2.5.3
+- queuelib v1.4.2
+- requests v2.11.1
+- Scrapy v1.1.2
+- service-identity v16.0.0
+- simplejson v3.8.2
+- six v1.10.0
+- Twisted v16.4.0
+- virtualenv v15.1.0
+- w3lib v1.17.0
+- Werkzeug v0.12
+- zope.interface v4.3.3
+
+## Swift actions
+
+### Swift 3
+Swift 3 actions are executed using Swift 3.1.1  `--kind swift:3.1.1`.  
+The default `--kind swift:default` is Swift 3.1.1.
+
+Swift 3.1.1 actions can use the following packages:
+- KituraNet version 1.7.6, https://github.com/IBM-Swift/Kitura-net
+- SwiftyJSON version 15.0.1, https://github.com/IBM-Swift/SwiftyJSON
+- Watson Developer Cloud SDK version 0.16.0, https://github.com/watson-developer-cloud/swift-sdk
+
+## PHP actions
+
+PHP actions are executed using PHP 7.1. To use this runtime, specify the `wsk` CLI parameter `--kind php:7.1` when creating or updating an action. This is the default when creating an action with file that has a `.php` extension.
+
+The following PHP extensions are available in addition to the standard ones:
+
+- bcmath
+- curl
+- gd
+- intl
+- mbstring
+- mysqli
+- pdo_mysql
+- pdo_pgsql
+- pdo_sqlite
+- soap
+- zip
+
+### Composer packages
+
+The following Composer packages are also available:
+
+- guzzlehttp/guzzle       v6.3.0
+- ramsey/uuid             v3.6.1
 
 ## Docker actions
 
-Docker actions run a user-supplied binary in a Docker container. The binary runs in a Docker image based on [python:2.7.12-alpine](https://hub.docker.com/r/library/python), so the binary must be compatible with this distribution.
+Docker actions run a user-supplied binary in a Docker container. The binary runs in a Docker image based on [python:3.6.1-alpine](https://hub.docker.com/r/library/python), so the binary must be compatible with this distribution.
 
 The Docker skeleton is a convenient way to build OpenWhisk-compatible Docker images. You can install the skeleton with the `wsk sdk install docker` CLI command.
 
-The main binary program must be located in `/action/exec` inside the container. The executable receives the input arguments via `stdin` and must return a result via `stdout`.
+The main binary program must be located in `/action/exec` inside the container. The executable receives the input arguments via a single command-line argument string which can be deserialized as a `JSON` object. It must return a result via `stdout` as a single-line string of serialized `JSON`.
 
 You may include any compilation steps or dependencies by modifying the `Dockerfile` included in the `dockerSkeleton`.
 
 ## REST API
+Information about the REST API can be found [here](rest_api.md)
 
-All the capabilities in the system are available through a REST API. There are collection and entity endpoints for actions, triggers, rules, packages, activations, and namespaces.
-
-These are the collection endpoints:
-- `https://{BASE URL}/api/v1/namespaces`
-- `https://{BASE URL}/api/v1/namespaces/{namespace}/actions`
-- `https://{BASE URL}/api/v1/namespaces/{namespace}/triggers`
-- `https://{BASE URL}/api/v1/namespaces/{namespace}/rules`
-- `https://{BASE URL}/api/v1/namespaces/{namespace}/packages`
-- `https://{BASE URL}/api/v1/namespaces/{namespace}/activations`
-
-The `{BASE URL}` is the OpenWhisk API hostname (for example, openwhisk.ng.bluemix.net, 172.17.0.1, and so on).
-For the `{namespace}`, the character `_` can be used to specify the user's *default
-namespace* (that is, email address).
-
-You can perform a GET request on the collection endpoints to fetch a list of entities in the collection.
-
-There are entity endpoints for each type of entity:
-- `https://{BASE URL}/api/v1/namespaces/{namespace}`
-- `https://{BASE URL}/api/v1/namespaces/{namespace}/actions/[{packageName}/]{actionName}`
-- `https://{BASE URL}/api/v1/namespaces/{namespace}/triggers/{triggerName}`
-- `https://{BASE URL}/api/v1/namespaces/{namespace}/rules/{ruleName}`
-- `https://{BASE URL}/api/v1/namespaces/{namespace}/packages/{packageName}`
-- `https://{BASE URL}/api/v1/namespaces/{namespace}/activations/{activationName}`
-
-The namespace and activation endpoints support only GET requests. The actions, triggers, rules, and packages endpoints support GET, PUT, and DELETE requests. The endpoints of actions, triggers, and rules also support POST requests, which are used to invoke actions and triggers and enable or disable rules. Refer to the [API reference](http://petstore.swagger.io/?url=https://raw.githubusercontent.com/openwhisk/openwhisk/master/core/controller/src/main/resources/whiskswagger.json) for details.
-
-All APIs are protected with HTTP Basic authentication. The Basic authentication credentials are in the `AUTH` property in your `~/.wskprops` file, delimited by a colon. You can also retrieve these credentials in the [CLI configuration steps](../README.md#setup-cli)).
-The following is an example that uses the cURL command to get the list of all packages in the `whisk.system` namespace:
-
-```
-$ curl -u USERNAME:PASSWORD https://openwhisk.ng.bluemix.net/api/v1/namespaces/whisk.system/packages
-```
-
-```
-[
-  {
-    "name": "slack",
-    "binding": false,
-    "publish": true,
-    "annotations": [
-      {
-        "key": "description",
-        "value": "Package that contains actions to interact with the Slack messaging service"
-      }
-    ],
-    "version": "0.0.9",
-    "namespace": "whisk.system"
-  },
-  ...
-]
-```
-
-The OpenWhisk API supports request-response calls from web clients. OpenWhisk responds to `OPTIONS` requests with Cross-Origin Resource Sharing headers. Currently, all origins are allowed (that is, Access-Control-Allow-Origin is "`*`") and Access-Control-Allow-Headers yield Authorization and Content-Type.
-
-**Attention:** Because OpenWhisk currently supports only one key per account, it is not recommended to use CORS beyond simple experiments. Your key would need to be embedded in client-side code, making it visible to the public. Use with caution.
 
 ## System limits
 
@@ -425,9 +440,10 @@ The following table lists the default limits for actions.
 | memory | a container is not allowed to allocate more than N MB of memory | per action | MB | 256 |
 | logs | a container is not allowed to write more than N MB to stdout | per action | MB | 10 |
 | concurrent | no more than N activations may be submitted per namespace either executing or queued for execution | per namespace | number | 100 |
-| minuteRate | no more than N activations may be submitted per namespace per minute | per user | number | 120 |
+| minuteRate | no more than N activations may be submitted per namespace per minute | per namespace | number | 120 |
 | codeSize | the maximum size of the actioncode | not configurable, limit per action | MB | 48 |
 | parameters | the maximum size of the parameters that can be attached | not configurable, limit per action/package/trigger | MB | 1 |
+| result | the maximum size of the action result | not configurable, limit per action | MB | 1 |
 
 ### Per action timeout (ms) (Default: 60s)
 * The timeout limit N is in the range [100ms..300000ms] and is set per action in milliseconds.
@@ -451,9 +467,11 @@ The following table lists the default limits for actions.
 ### Per activation payload size (MB) (Fixed: 1MB)
 * The maximum POST content size plus any curried parameters for an action invocation or trigger firing is 1MB.
 
+### Per activation result size (MB) (Fixed: 1MB)
+* The maximum size of a result returned from an action is 1MB.
+
 ### Per namespace concurrent invocation (Default: 100)
 * The number of activations that are either executing or queued for execution for a namespace cannot exceed 100.
-* The default limit can be statically configured by whisk in consul kvstore.
 * A user is currently not able to change the limits.
 
 ### Invocations per minute (Fixed: 120)

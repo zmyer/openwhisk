@@ -10,12 +10,20 @@ default.props
 results
 *.retry
 
+# Environments
+/ansible/environments/*
+!/ansible/environments/distributed
+!/ansible/environments/docker-machine
+!/ansible/environments/local
+!/ansible/environments/mac
+
 # Eclipse
 bin/
 **/.project
 .settings/
 .classpath
 .cache-main
+.cache-tests
 
 # Linux
 *~
@@ -40,19 +48,26 @@ node_modules
 
 # IntelliJ
 .idea
+*.class
+*.iml
+out/
 
 # Ansible
-ansible/environments/mac/hosts
+ansible/environments/docker-machine/hosts
+ansible/environments/local/hosts
 ansible/db_local.ini*
 ansible/tmp/*
+ansible/roles/nginx/files/openwhisk-client*
 ansible/roles/nginx/files/*.csr
 ansible/roles/nginx/files/*cert.pem
-
-# Action proxies copied during build
-core/swiftAction/actionproxy.py
-core/swift3Action/actionproxy.py
 
 # .zip files must be explicited whitelisted
 *.zip
 !tests/dat/actions/blackbox.zip
+!tests/dat/actions/helloSwift.zip
+!tests/dat/actions/python.zip
+!tests/dat/actions/python2_virtualenv.zip
+!tests/dat/actions/python3_virtualenv.zip
+!tests/dat/actions/python_virtualenv_dir.zip
+!tests/dat/actions/python_virtualenv_name.zip
 !tests/dat/actions/zippedaction.zip

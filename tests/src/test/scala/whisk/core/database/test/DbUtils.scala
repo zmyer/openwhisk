@@ -17,26 +17,28 @@
 
 package whisk.core.database.test
 
+import java.util.Base64
 import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicInteger
 
-import scala.collection.mutable.ListBuffer
-import scala.concurrent.Await
-import scala.concurrent.ExecutionContext
-import scala.concurrent.Future
-import scala.concurrent.duration.Duration
-import scala.concurrent.duration.DurationInt
-import scala.language.postfixOps
-import scala.util.Failure
-import scala.util.Success
-import scala.util.Try
-import spray.json._
+import akka.http.scaladsl.model.ContentType
+import akka.stream.scaladsl.Source
+import akka.util.ByteString
+import org.scalatest.Assertions
 import spray.json.DefaultJsonProtocol._
-import whisk.common.TransactionCounter
+import spray.json._
 import whisk.common.TransactionId
 import whisk.core.database._
+import whisk.core.database.memory.MemoryArtifactStore
+import whisk.core.entity.Attachments.Attached
 import whisk.core.entity._
-import whisk.core.entity.types.AuthStore
-import whisk.core.entity.types.EntityStore
+import whisk.core.entity.types.{AuthStore, EntityStore}
+
+import scala.collection.mutable.ListBuffer
+import scala.concurrent.{Await, ExecutionContext, Future}
+import scala.concurrent.duration.{Duration, DurationInt}
+import scala.language.postfixOps
+import scala.util.{Failure, Random, Success, Try}
 
 /**
  * WARNING: the put/get/del operations in this trait operate directly on the datastore,
@@ -44,20 +46,22 @@ import whisk.core.entity.types.EntityStore
  * operations with those that flow through the cache. To mitigate this, use unique asset
  * names in tests, and defer all cleanup to the end of a test suite.
  */
-trait DbUtils extends TransactionCounter {
+trait DbUtils extends Assertions {
   implicit val dbOpTimeout = 15 seconds
-  override val numberOfInstances = 1
-  override val instanceOrdinal = 0
-  val instance = InstanceId(instanceOrdinal)
+  val instance = ControllerInstanceId("0")
   val docsToDelete = ListBuffer[(ArtifactStore[_], DocInfo)]()
   case class RetryOp() extends Throwable
+
+  val cnt = new AtomicInteger(0)
+  def transid() = TransactionId(cnt.incrementAndGet().toString)
 
   /**
    * Retry an operation 'step()' awaiting its result up to 'timeout'.
    * Attempt the operation up to 'count' times. The future from the
    * step is not aborted --- TODO fix this.
    */
-  def retry[T](step: () => Future[T], timeout: Duration, count: Int = 5): Try[T] = {
+  def retry[T](step: () => Future[T], timeout: Duration, count: Int = 100): Try[T] = {
+    val graceBeforeRetry = 50.milliseconds
     val future = step()
     if (count > 0) try {
       val result = Await.result(future, timeout)
@@ -65,12 +69,15 @@ trait DbUtils extends TransactionCounter {
     } catch {
       case n: NoDocumentException =>
         println("no document exception, retrying")
+        Thread.sleep(graceBeforeRetry.toMillis)
         retry(step, timeout, count - 1)
       case RetryOp() =>
         println("condition not met, retrying")
+        Thread.sleep(graceBeforeRetry.toMillis)
         retry(step, timeout, count - 1)
       case t: TimeoutException =>
         println("timed out, retrying")
+        Thread.sleep(graceBeforeRetry.toMillis)
         retry(step, timeout, count - 1)
       case t: Throwable =>
         println(s"unexpected failure $t")
@@ -86,11 +93,31 @@ trait DbUtils extends TransactionCounter {
   def waitOnView[Au](db: ArtifactStore[Au], namespace: EntityName, count: Int, view: View)(
     implicit context: ExecutionContext,
     transid: TransactionId,
-    timeout: Duration) = {
+    timeout: Duration): Unit = waitOnViewImpl(db, namespace.asString, count, view)
+
+  /**
+   * Wait on a view to update with documents added to namespace. This uses retry above,
+   * where the step performs a direct db query to retrieve the view and check the count
+   * matches the given value.
+   */
+  def waitOnView[Au](db: ArtifactStore[Au], path: EntityPath, count: Int, view: View)(
+    implicit context: ExecutionContext,
+    transid: TransactionId,
+    timeout: Duration): Unit = waitOnViewImpl(db, path.asString, count, view)
+
+  /**
+   * Wait on a view to update with documents added to namespace. This uses retry above,
+   * where the step performs a direct db query to retrieve the view and check the count
+   * matches the given value.
+   */
+  private def waitOnViewImpl[Au](db: ArtifactStore[Au], key: String, count: Int, view: View)(
+    implicit context: ExecutionContext,
+    transid: TransactionId,
+    timeout: Duration): Unit = {
     val success = retry(
       () => {
-        val startKey = List(namespace.asString)
-        val endKey = List(namespace.asString, WhiskEntityQueries.TOP)
+        val startKey = List(key)
+        val endKey = List(key, WhiskEntityQueries.TOP)
         db.query(view.name, startKey, endKey, 0, 0, false, true, false, StaleParameter.No) map { l =>
           if (l.length != count) {
             throw RetryOp()
@@ -106,13 +133,15 @@ trait DbUtils extends TransactionCounter {
    * This uses retry above, where the step performs a collection-specific view query using the collection
    * factory. The result count from the view is checked against the given value.
    */
-  def waitOnView(db: EntityStore, factory: WhiskEntityQueries[_], namespace: EntityPath, count: Int)(
-    implicit context: ExecutionContext,
-    transid: TransactionId,
-    timeout: Duration) = {
+  def waitOnView(
+    db: EntityStore,
+    factory: WhiskEntityQueries[_],
+    namespace: EntityPath,
+    count: Int,
+    includeDocs: Boolean = false)(implicit context: ExecutionContext, transid: TransactionId, timeout: Duration) = {
     val success = retry(() => {
-      factory.listCollectionInNamespace(db, namespace, 0, 0) map { l =>
-        if (l.left.get.length < count) {
+      factory.listCollectionInNamespace(db, namespace, 0, 0, includeDocs) map { l =>
+        if (l.fold(_.length, _.length) < count) {
           throw RetryOp()
         } else true
       }
@@ -124,9 +153,9 @@ trait DbUtils extends TransactionCounter {
    * Wait on view for the authentication table. This is like the other waitOnViews but
    * specific to the WhiskAuth records.
    */
-  def waitOnView(db: AuthStore, authkey: AuthKey, count: Int)(implicit context: ExecutionContext,
-                                                              transid: TransactionId,
-                                                              timeout: Duration) = {
+  def waitOnView(db: AuthStore, authkey: BasicAuthenticationAuthKey, count: Int)(implicit context: ExecutionContext,
+                                                                                 transid: TransactionId,
+                                                                                 timeout: Duration) = {
     val success = retry(() => {
       Identity.list(db, List(authkey.uuid.asString, authkey.key.asString)) map { l =>
         if (l.length != count) {
@@ -170,6 +199,21 @@ trait DbUtils extends TransactionCounter {
     assert(doc != null)
     if (garbageCollect) docsToDelete += ((db, doc))
     doc
+  }
+
+  def putAndAttach[A <: DocumentRevisionProvider, Au >: A](
+    db: ArtifactStore[Au],
+    doc: A,
+    update: (A, Attached) => A,
+    contentType: ContentType,
+    docStream: Source[ByteString, _],
+    oldAttachment: Option[Attached],
+    garbageCollect: Boolean = true)(implicit transid: TransactionId, timeout: Duration = 10 seconds): DocInfo = {
+    val docFuture = db.putAndAttach[A](doc, update, contentType, docStream, oldAttachment)
+    val newDoc = Await.result(docFuture, timeout)._1
+    assert(newDoc != null)
+    if (garbageCollect) docsToDelete += ((db, newDoc))
+    newDoc
   }
 
   /**
@@ -232,8 +276,57 @@ trait DbUtils extends TransactionCounter {
    */
   def cleanup()(implicit timeout: Duration = 10 seconds) = {
     docsToDelete.map { e =>
-      Try(Await.result(e._1.del(e._2)(TransactionId.testing), timeout))
+      Try {
+        Await.result(e._1.del(e._2)(TransactionId.testing), timeout)
+        Await.result(e._1.deleteAttachments(e._2)(TransactionId.testing), timeout)
+      }
     }
     docsToDelete.clear()
+  }
+
+  /**
+   * Generates a Base64 string for code which would not be inlined by the ArtifactStore
+   */
+  def nonInlinedCode(db: ArtifactStore[_]): String = {
+    encodedRandomBytes(nonInlinedAttachmentSize(db))
+  }
+
+  /**
+   * Size in bytes for attachments which would always be inlined.
+   */
+  def inlinedAttachmentSize(db: ArtifactStore[_]): Int = {
+    db match {
+      case inliner: AttachmentSupport[_] =>
+        inliner.maxInlineSize.toBytes.toInt - 1
+      case _ =>
+        throw new IllegalStateException(s"ArtifactStore does not support attachment inlining $db")
+    }
+  }
+
+  /**
+   * Size in bytes for attachments which would never be inlined.
+   */
+  def nonInlinedAttachmentSize(db: ArtifactStore[_]): Int = {
+    db match {
+      case inliner: AttachmentSupport[_] =>
+        inliner.maxInlineSize.toBytes.toInt * 2
+      case _ =>
+        42
+    }
+  }
+
+  def assumeAttachmentInliningEnabled(db: ArtifactStore[_]): Unit = {
+    assume(inlinedAttachmentSize(db) > 0, "Attachment inlining is disabled")
+  }
+
+  protected def encodedRandomBytes(size: Int): String = Base64.getEncoder.encodeToString(randomBytes(size))
+
+  def isMemoryStore(store: ArtifactStore[_]): Boolean = store.isInstanceOf[MemoryArtifactStore[_]]
+  def isCouchStore(store: ArtifactStore[_]): Boolean = store.isInstanceOf[CouchDbRestStore[_]]
+
+  protected def randomBytes(size: Int): Array[Byte] = {
+    val arr = new Array[Byte](size)
+    Random.nextBytes(arr)
+    arr
   }
 }

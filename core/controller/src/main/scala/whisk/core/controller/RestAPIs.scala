@@ -17,32 +17,31 @@
 
 package whisk.core.controller
 
-import scala.concurrent.ExecutionContext
-
 import akka.actor.ActorSystem
+import akka.http.scaladsl.marshallers.sprayjson.SprayJsonSupport._
 import akka.http.scaladsl.model.StatusCodes._
 import akka.http.scaladsl.model.Uri
-import akka.http.scaladsl.server.Directives
-import akka.http.scaladsl.server.Route
 import akka.http.scaladsl.model.headers._
-import akka.http.scaladsl.marshallers.sprayjson.SprayJsonSupport._
+import akka.http.scaladsl.server.directives.AuthenticationDirective
+import akka.http.scaladsl.server.{Directives, Route}
 import akka.stream.ActorMaterializer
-
-import spray.json._
+import pureconfig.loadConfigOrThrow
 import spray.json.DefaultJsonProtocol._
-import whisk.core.database.CacheChangeNotification
-import whisk.core.WhiskConfig
-import whisk.core.WhiskConfig.whiskVersionBuildno
-import whisk.core.WhiskConfig.whiskVersionDate
-import whisk.common.Logging
-import whisk.common.TransactionId
+import spray.json._
+import whisk.common.{Logging, TransactionId}
 import whisk.core.containerpool.logging.LogStore
+import whisk.core.database.{ActivationStore, CacheChangeNotification}
 import whisk.core.entitlement._
-import whisk.core.entity._
 import whisk.core.entity.ActivationId.ActivationIdGenerator
-import whisk.core.entity.WhiskAuthStore
+import whisk.core.entity._
 import whisk.core.entity.types._
-import whisk.core.loadBalancer.LoadBalancerService
+import whisk.core.loadBalancer.LoadBalancer
+import whisk.core.{ConfigKeys, WhiskConfig}
+import whisk.http.Messages
+import whisk.spi.{Spi, SpiLoader}
+
+import scala.concurrent.{ExecutionContext, Future}
+import scala.util.{Failure, Success, Try}
 
 /**
  * Abstract class which provides basic Directives which are used to construct route structures
@@ -81,19 +80,12 @@ protected[controller] class SwaggerDocs(apipath: Uri.Path, doc: String)(implicit
 protected[controller] object RestApiCommons {
   def requiredProperties =
     Map(WhiskConfig.servicePort -> 8080.toString) ++
-      WhiskConfig.whiskVersion ++
-      WhiskAuthStore.requiredProperties ++
-      WhiskEntityStore.requiredProperties ++
-      WhiskActivationStore.requiredProperties ++
       EntitlementProvider.requiredProperties ++
-      WhiskActionsApi.requiredProperties ++
-      Authenticate.requiredProperties ++
-      Collection.requiredProperties
+      WhiskActionsApi.requiredProperties
 
   import akka.http.scaladsl.model.HttpCharsets
   import akka.http.scaladsl.model.MediaTypes.`application/json`
-  import akka.http.scaladsl.unmarshalling.FromEntityUnmarshaller
-  import akka.http.scaladsl.unmarshalling.Unmarshaller
+  import akka.http.scaladsl.unmarshalling.{FromEntityUnmarshaller, Unmarshaller}
 
   /**
    * Extract an empty entity into a JSON object. This is useful for the
@@ -103,7 +95,7 @@ protected[controller] object RestApiCommons {
   implicit val emptyEntityToJsObject: FromEntityUnmarshaller[JsObject] = {
     Unmarshaller.byteStringUnmarshaller.forContentTypes(`application/json`).mapWithCharset { (data, charset) =>
       if (data.size == 0) {
-        JsObject()
+        JsObject.empty
       } else {
         val input = {
           if (charset == HttpCharsets.`UTF-8`) ParserInput(data.toArray)
@@ -111,6 +103,36 @@ protected[controller] object RestApiCommons {
         }
 
         JsonParser(input).asJsObject
+      }
+    }
+  }
+
+  /** Custom unmarshaller for query parameters "limit" for "list" operations. */
+  case class ListLimit(n: Int)
+
+  def stringToListLimit(collection: Collection): Unmarshaller[String, ListLimit] = {
+    Unmarshaller.strict[String, ListLimit] { value =>
+      Try { value.toInt } match {
+        case Success(n) if (n == 0)                                  => ListLimit(Collection.MAX_LIST_LIMIT)
+        case Success(n) if (n > 0 && n <= Collection.MAX_LIST_LIMIT) => ListLimit(n)
+        case Success(n) =>
+          throw new IllegalArgumentException(
+            Messages.listLimitOutOfRange(collection.path, n, Collection.MAX_LIST_LIMIT))
+        case Failure(t) => throw new IllegalArgumentException(Messages.argumentNotInteger(collection.path, value))
+      }
+    }
+  }
+
+  /** Custom unmarshaller for query parameters "skip" for "list" operations. */
+  case class ListSkip(n: Int)
+
+  def stringToListSkip(collection: Collection): Unmarshaller[String, ListSkip] = {
+    Unmarshaller.strict[String, ListSkip] { value =>
+      Try { value.toInt } match {
+        case Success(n) if (n >= 0) => ListSkip(n)
+        case Success(n) =>
+          throw new IllegalArgumentException(Messages.listSkipOutOfRange(collection.path, n))
+        case Failure(t) => throw new IllegalArgumentException(Messages.argumentNotInteger(collection.path, value))
       }
     }
   }
@@ -132,25 +154,29 @@ protected[controller] trait RespondWithHeaders extends Directives {
   val sendCorsHeaders = respondWithHeaders(allowOrigin, allowHeaders)
 }
 
+case class WhiskInformation(buildNo: String, date: String)
+
 class RestAPIVersion(config: WhiskConfig, apiPath: String, apiVersion: String)(
-  implicit val activeAckTopicIndex: InstanceId,
+  implicit val activeAckTopicIndex: ControllerInstanceId,
   implicit val actorSystem: ActorSystem,
   implicit val materializer: ActorMaterializer,
   implicit val logging: Logging,
   implicit val entityStore: EntityStore,
   implicit val entitlementProvider: EntitlementProvider,
   implicit val activationIdFactory: ActivationIdGenerator,
-  implicit val loadBalancer: LoadBalancerService,
+  implicit val loadBalancer: LoadBalancer,
   implicit val cacheChangeNotification: Some[CacheChangeNotification],
   implicit val activationStore: ActivationStore,
   implicit val logStore: LogStore,
   implicit val whiskConfig: WhiskConfig)
     extends SwaggerDocs(Uri.Path(apiPath) / apiVersion, "apiv1swagger.json")
-    with Authenticate
-    with AuthenticatedRoute
     with RespondWithHeaders {
   implicit val executionContext = actorSystem.dispatcher
-  implicit val authStore = WhiskAuthStore.datastore(config)
+  implicit val authStore = WhiskAuthStore.datastore()
+  val whiskInfo = loadConfigOrThrow[WhiskInformation](ConfigKeys.buildInformation)
+
+  private implicit val authenticationDirectiveProvider =
+    SpiLoader.get[AuthenticationDirectiveProvider]
 
   def prefix = pathPrefix(apiPath / apiVersion)
 
@@ -163,41 +189,41 @@ class RestAPIVersion(config: WhiskConfig, apiPath: String, apiVersion: String)(
         "description" -> "OpenWhisk API".toJson,
         "api_version" -> SemVer(1, 0, 0).toJson,
         "api_version_path" -> apiVersion.toJson,
-        "build" -> whiskConfig(whiskVersionDate).toJson,
-        "buildno" -> whiskConfig(whiskVersionBuildno).toJson,
+        "build" -> whiskInfo.date.toJson,
+        "buildno" -> whiskInfo.buildNo.toJson,
         "swagger_paths" -> JsObject("ui" -> s"/$swaggeruipath".toJson, "api-docs" -> s"/$swaggerdocpath".toJson)))
   }
 
   def routes(implicit transid: TransactionId): Route = {
     prefix {
       sendCorsHeaders {
-        info ~ basicAuth(validateCredentials) { user =>
-          namespaces.routes(user) ~
-            pathPrefix(Collection.NAMESPACES) {
-              actions.routes(user) ~
-                triggers.routes(user) ~
-                rules.routes(user) ~
-                activations.routes(user) ~
-                packages.routes(user)
-            }
-        } ~ {
+        info ~
+          authenticationDirectiveProvider.authenticate(transid, authStore, logging) { user =>
+            namespaces.routes(user) ~
+              pathPrefix(Collection.NAMESPACES) {
+                actions.routes(user) ~
+                  triggers.routes(user) ~
+                  rules.routes(user) ~
+                  activations.routes(user) ~
+                  packages.routes(user)
+              }
+          } ~
           swaggerRoutes
-        }
       } ~ {
         // web actions are distinct to separate the cors header
         // and allow the actions themselves to respond to options
-        basicAuth(validateCredentials) { user =>
+        authenticationDirectiveProvider.authenticate(transid, authStore, logging) { user =>
           web.routes(user)
         } ~ {
           web.routes()
-        } ~ options {
-          sendCorsHeaders {
-            complete(OK)
+        } ~
+          options {
+            sendCorsHeaders {
+              complete(OK)
+            }
           }
-        }
       }
     }
-
   }
 
   private val namespaces = new NamespacesApi(apiPath, apiVersion)
@@ -208,21 +234,16 @@ class RestAPIVersion(config: WhiskConfig, apiPath: String, apiVersion: String)(
   private val rules = new RulesApi(apiPath, apiVersion)
   private val web = new WebActionsApi(Seq("web"), new WebApiDirectives())
 
-  class NamespacesApi(val apiPath: String, val apiVersion: String)(
-    implicit override val entityStore: EntityStore,
-    override val entitlementProvider: EntitlementProvider,
-    override val executionContext: ExecutionContext,
-    override val logging: Logging)
-      extends WhiskNamespacesApi
+  class NamespacesApi(val apiPath: String, val apiVersion: String) extends WhiskNamespacesApi
 
   class ActionsApi(val apiPath: String, val apiVersion: String)(
     implicit override val actorSystem: ActorSystem,
-    override val activeAckTopicIndex: InstanceId,
+    override val activeAckTopicIndex: ControllerInstanceId,
     override val entityStore: EntityStore,
     override val activationStore: ActivationStore,
     override val entitlementProvider: EntitlementProvider,
     override val activationIdFactory: ActivationIdGenerator,
-    override val loadBalancer: LoadBalancerService,
+    override val loadBalancer: LoadBalancer,
     override val cacheChangeNotification: Some[CacheChangeNotification],
     override val executionContext: ExecutionContext,
     override val logging: Logging,
@@ -245,7 +266,7 @@ class RestAPIVersion(config: WhiskConfig, apiPath: String, apiVersion: String)(
     implicit override val entityStore: EntityStore,
     override val entitlementProvider: EntitlementProvider,
     override val activationIdFactory: ActivationIdGenerator,
-    override val loadBalancer: LoadBalancerService,
+    override val loadBalancer: LoadBalancer,
     override val cacheChangeNotification: Some[CacheChangeNotification],
     override val executionContext: ExecutionContext,
     override val logging: Logging,
@@ -258,7 +279,7 @@ class RestAPIVersion(config: WhiskConfig, apiPath: String, apiVersion: String)(
     override val entityStore: EntityStore,
     override val entitlementProvider: EntitlementProvider,
     override val activationIdFactory: ActivationIdGenerator,
-    override val loadBalancer: LoadBalancerService,
+    override val loadBalancer: LoadBalancer,
     override val cacheChangeNotification: Some[CacheChangeNotification],
     override val executionContext: ExecutionContext,
     override val logging: Logging,
@@ -272,7 +293,7 @@ class RestAPIVersion(config: WhiskConfig, apiPath: String, apiVersion: String)(
     override val entitlementProvider: EntitlementProvider,
     override val activationStore: ActivationStore,
     override val activationIdFactory: ActivationIdGenerator,
-    override val loadBalancer: LoadBalancerService,
+    override val loadBalancer: LoadBalancer,
     override val cacheChangeNotification: Some[CacheChangeNotification],
     override val executionContext: ExecutionContext,
     override val logging: Logging,
@@ -285,15 +306,43 @@ class RestAPIVersion(config: WhiskConfig, apiPath: String, apiVersion: String)(
                                             override val webApiDirectives: WebApiDirectives)(
     implicit override val authStore: AuthStore,
     implicit val entityStore: EntityStore,
-    override val activeAckTopicIndex: InstanceId,
+    override val activeAckTopicIndex: ControllerInstanceId,
     override val activationStore: ActivationStore,
     override val entitlementProvider: EntitlementProvider,
     override val activationIdFactory: ActivationIdGenerator,
-    override val loadBalancer: LoadBalancerService,
+    override val loadBalancer: LoadBalancer,
     override val actorSystem: ActorSystem,
     override val executionContext: ExecutionContext,
     override val logging: Logging,
     override val whiskConfig: WhiskConfig)
       extends WhiskWebActionsApi
       with WhiskServices
+}
+
+trait AuthenticationDirectiveProvider extends Spi {
+
+  /**
+   * Returns an authentication directive used to validate the
+   * passed user credentials.
+   * At runtime the directive returns an user identity
+   * which is passed to the following routes.
+   *
+   * @return authentication directive used to verify the user credentials
+   */
+  def authenticate(implicit transid: TransactionId,
+                   authStore: AuthStore,
+                   logging: Logging): AuthenticationDirective[Identity]
+
+  /**
+   * Retrieves an Identity based on a given namespace name.
+   *
+   * For use-cases of anonymous invocation (i.e. WebActions),
+   * we need to an identity based on a given namespace-name to
+   * give the invocation all the context needed.
+   *
+   * @param namespace the namespace that the identity will be based on
+   * @return identity based on the given namespace
+   */
+  def identityByNamespace(namespace: EntityName)(implicit transid: TransactionId,
+                                                 authStore: AuthStore): Future[Identity]
 }

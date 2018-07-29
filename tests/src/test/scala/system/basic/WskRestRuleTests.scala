@@ -21,12 +21,20 @@ import org.junit.runner.RunWith
 import org.scalatest.junit.JUnitRunner
 
 import common.TestUtils.RunResult
-import common.rest.WskRest
+import common.rest.WskRestOperations
 import common.rest.RestResult
+import common.WskActorSystem
+
+import whisk.utils.retry
+
+import scala.concurrent.duration._
+
+import spray.json._
+import spray.json.DefaultJsonProtocol._
 
 @RunWith(classOf[JUnitRunner])
-class WskRestRuleTests extends WskRuleTests {
-  override val wsk: common.rest.WskRest = new WskRest
+class WskRestRuleTests extends WskRuleTests with WskActorSystem {
+  override val wsk = new WskRestOperations
 
   override def verifyRuleList(ruleListResult: RunResult,
                               ruleNameEnable: String,
@@ -37,8 +45,36 @@ class WskRestRuleTests extends WskRuleTests {
     ruleEnable.getField("status") shouldBe "active"
     val ruleDisable = wsk.rule.get(ruleName)
     ruleDisable.getField("status") shouldBe "inactive"
-    rules.exists(rule => RestResult.getField(rule, "name") == ruleNameEnable)
-    rules.exists(rule => RestResult.getField(rule, "name") == ruleName)
+    rules.exists(rule => RestResult.getField(rule, "name") == ruleNameEnable) shouldBe true
+    rules.exists(rule => RestResult.getField(rule, "name") == ruleName) shouldBe true
     ruleListResultRest.respData should not include ("Unknown")
+  }
+
+  it should "preserve rule status when a rule is updated" in withAssetCleaner(wskprops) { (wp, assetHelper) =>
+    val ruleName = withTimestamp("r1to1")
+    val triggerName = withTimestamp("t1to1")
+    val actionName = withTimestamp("a1 to 1")
+    val triggerName2 = withTimestamp("t2to1")
+    val active = Some("active".toJson)
+    val inactive = Some("inactive".toJson)
+    val statusPermutations =
+      Seq((triggerName, active), (triggerName, inactive), (triggerName2, active), (triggerName, inactive))
+
+    ruleSetup(Seq((ruleName, triggerName, (actionName, actionName, defaultAction))), assetHelper)
+    assetHelper.withCleaner(wsk.trigger, triggerName2) { (trigger, name) =>
+      trigger.create(name)
+    }
+
+    statusPermutations.foreach {
+      case (trigger, status) =>
+        if (status == active) wsk.rule.enable(ruleName) else wsk.rule.disable(ruleName)
+        // Needs to be retried since the enable/disable causes a cache invalidation which needs to propagate first
+        retry({
+          val createStdout = wsk.rule.create(ruleName, trigger, actionName, update = true).stdout
+          val getStdout = wsk.rule.get(ruleName).stdout
+          wsk.parseJsonString(createStdout).fields.get("status") shouldBe status
+          wsk.parseJsonString(getStdout).fields.get("status") shouldBe status
+        }, 10, Some(1.second))
+    }
   }
 }

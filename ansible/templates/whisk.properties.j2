@@ -7,9 +7,7 @@ testing.auth={{ openwhisk_home }}/ansible/files/auth.guest
 vcap.services.file=
 
 whisk.logs.dir={{ whisk_logs_dir }}
-whisk.version.name={{ whisk_version_name }}
-whisk.version.date={{ whisk.version.date }}
-whisk.version.buildno={{ docker.image.tag }}
+environment.type={{ environmentInformation.type }}
 whisk.ssl.client.verification={{ nginx.ssl.verify_client }}
 whisk.ssl.cert={{ nginx.ssl.path }}/{{ nginx.ssl.cert }}
 whisk.ssl.key={{ nginx.ssl.path }}/{{ nginx.ssl.key }}
@@ -37,7 +35,6 @@ runtimes.manifest={{ runtimesManifest | to_json }}
 
 limits.actions.invokes.perMinute={{ limits.invocationsPerMinute }}
 limits.actions.invokes.concurrent={{ limits.concurrentInvocations }}
-limits.actions.invokes.concurrentInSystem={{ limits.concurrentInvocationsSystem }}
 limits.triggers.fires.perMinute={{ limits.firesPerMinute }}
 limits.actions.sequence.maxLength={{ limits.sequenceMaxLength }}
 
@@ -56,7 +53,7 @@ invoker.hosts.basePort={{ invoker.port }}
 controller.hosts={{ groups["controllers"] | map('extract', hostvars, 'ansible_host') | list | join(",") }}
 controller.host.basePort={{ controller.basePort }}
 controller.instances={{ controller.instances }}
-controller.ha={{ controller.ha }}
+controller.protocol={{ controller.protocol }}
 
 invoker.container.network=bridge
 invoker.container.policy={{ invoker_container_policy_name | default()}}
@@ -64,7 +61,6 @@ invoker.container.dns={{ invoker_container_network_dns_servers | default()}}
 invoker.numcore={{ invoker.numcore }}
 invoker.coreshare={{ invoker.coreshare }}
 invoker.useRunc={{ invoker.useRunc }}
-invoker.instances={{ invoker.instances }}
 
 main.docker.endpoint={{ hostvars[groups["controllers"]|first].ansible_host }}:{{ docker.port }}
 
@@ -79,19 +75,16 @@ docker.addHost.cmd=
 docker.dns.cmd={{ docker_dns }}
 docker.restart.opts={{ docker.restart.policy }}
 
-db.provider={{ db_provider }}
-db.protocol={{ db_protocol }}
-db.host={{ db_host }}
-db.port={{ db_port }}
-db.username={{ db_username }}
-db.password={{ db_password }}
+db.provider={{ db.provider }}
+db.protocol={{ db.protocol }}
+db.host={{ db.host }}
+db.port={{ db.port }}
+db.username={{ db.credentials.admin.user }}
+db.password={{ db.credentials.admin.pass }}
 db.prefix={{ db_prefix }}
 db.whisk.auths={{ db.whisk.auth }}
 db.whisk.actions={{ db.whisk.actions }}
 db.whisk.activations={{ db.whisk.activations }}
-db.whisk.actions.ddoc={{ db.whisk.actions_ddoc }}
-db.whisk.activations.ddoc={{ db.whisk.activations_ddoc }}
-db.whisk.activations.filter.ddoc={{ db.whisk.activations_filter_ddoc }}
 db.hostsList={{ groups["db"] | map('extract', hostvars, 'ansible_host') | list | join(",") }}
 db.instances={{ db.instances }}
 

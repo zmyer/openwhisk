@@ -1,10 +1,12 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more contributor
+# license agreements; and to You under the Apache License, Version 2.0.
 ---
-# This playbook deploys a docker registry using a self-signed cert.  
+# This playbook deploys a docker registry using a self-signed cert.
 
 # Generate cert if needed. Not used currently.
 - hosts: ansible
   tasks:
-  - include: roles/registry/tasks/gencert.yml
+  - import_tasks: roles/registry/tasks/gencert.yml
     when: mode == "deploy" and registry.gencert == true
 
 # Deploy registry
@@ -16,5 +18,5 @@
 - hosts: all:!ansible
   become: true
   tasks:
-  - include: roles/registry/tasks/publish.yml
+  - import_tasks: roles/registry/tasks/publish.yml
     when: mode == "deploy" and registry.gencert

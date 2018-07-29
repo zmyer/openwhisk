@@ -1,10 +1,12 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more contributor
+# license agreements; and to You under the Apache License, Version 2.0.
 ---
 # This task will install the standard actions and packages available in openwhisk-catalog repos.
 
 - set_fact:
     catalog_location={{ item.value.location }}
     catalog_repo_url={{ item.value.url }}
-    api_host={{ groups['edge'] | first }}
+    api_host={{ whisk_api_host_name | default(groups['edge'] | first) }}
     version="HEAD"
     repo_update="yes"
 
@@ -18,6 +20,17 @@
 
 - set_fact:
     skip_catalog_install="{{ item.value.skip | default(false) }}"
+
+- set_fact:
+    environment_catalog:
+      OPENWHISK_HOME: "{{ openwhisk_home }}"
+
+- set_fact:
+    environment_catalog: "{{ environment_catalog | combine( { the_item.key: the_item.value } ) }}"
+  when: item.value.environment is defined
+  with_dict: "{{ item.value.environment }}"
+  loop_control:
+    loop_var: the_item
 
 - name: "ensure catalog_location directory exists"
   file:
@@ -33,6 +46,5 @@
 
 - name: install the catalog from the catalog location
   shell: ./installCatalog.sh {{ catalog_auth_key }} {{ api_host }} {{ cli.path }} chdir="{{ catalog_location }}/packages"
-  environment:
-    OPENWHISK_HOME: "{{ openwhisk_home }}"
+  environment: "{{ environment_catalog }}"
   when: skip_catalog_install == false

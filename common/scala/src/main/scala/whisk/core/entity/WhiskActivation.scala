@@ -21,15 +21,12 @@ import java.time.Instant
 
 import scala.concurrent.Future
 import scala.util.Try
-
 import spray.json._
 import spray.json.DefaultJsonProtocol._
 import whisk.common.TransactionId
-import whisk.core.database.ArtifactStore
-import whisk.core.database.DocumentFactory
-import whisk.core.database.StaleParameter
-import whisk.core.WhiskConfig
-import whisk.core.WhiskConfig.{dbActivationsDesignDoc, dbActivationsFilterDesignDoc}
+import whisk.core.ConfigKeys
+import whisk.core.database.{ArtifactStore, CacheChangeNotification, DocumentFactory, StaleParameter}
+import pureconfig._
 
 /**
  * A WhiskActivation provides an abstraction of the meta-data
@@ -67,7 +64,7 @@ case class WhiskActivation(namespace: EntityPath,
                            publish: Boolean = false,
                            annotations: Parameters = Parameters(),
                            duration: Option[Long] = None)
-    extends WhiskEntity(EntityName(activationId.asString)) {
+    extends WhiskEntity(EntityName(activationId.asString), "activation") {
 
   require(cause != null, "cause undefined")
   require(start != null, "start undefined")
@@ -76,7 +73,10 @@ case class WhiskActivation(namespace: EntityPath,
 
   def toJson = WhiskActivation.serdes.write(this).asJsObject
 
-  /** This the activation summary as computed by the database view. Strictly used for testing. */
+  /**
+   * This the activation summary as computed by the database view.
+   * Strictly used in view testing to enforce alignment.
+   */
   override def summaryAsJson = {
     import WhiskActivation.instantSerdes
 
@@ -90,7 +90,7 @@ case class WhiskActivation(namespace: EntityPath,
     }
 
     JsObject(
-      super.summaryAsJson.fields +
+      super.summaryAsJson.fields - "updated" +
         ("activationId" -> activationId.toJson) +
         ("start" -> start.toJson) ++
         cause.map(("cause" -> _.toJson)) ++
@@ -131,8 +131,15 @@ object WhiskActivation
   val causedByAnnotation = "causedBy"
   val initTimeAnnotation = "initTime"
   val waitTimeAnnotation = "waitTime"
+  val conductorAnnotation = "conductor"
 
-  private implicit val instantSerdes = new RootJsonFormat[Instant] {
+  /** Some field names for compositions */
+  val actionField = "action"
+  val paramsField = "params"
+  val stateField = "state"
+  val valueField = "value"
+
+  protected[entity] implicit val instantSerdes = new RootJsonFormat[Instant] {
     def write(t: Instant) = t.toEpochMilli.toJson
 
     def read(value: JsValue) =
@@ -140,20 +147,16 @@ object WhiskActivation
         value match {
           case JsString(t) => Instant.parse(t)
           case JsNumber(i) => Instant.ofEpochMilli(i.bigDecimal.longValue)
-          case _           => deserializationError("timetsamp malformed")
+          case _           => deserializationError("timestamp malformed")
         }
-      } getOrElse deserializationError("timetsamp malformed")
+      } getOrElse deserializationError("timestamp malformed")
   }
 
   override val collectionName = "activations"
 
-  // FIXME: reading the design doc from sys.env instead of a canonical property reader
-  // because WhiskConfig requires a logger, which requires an actor system, neither of
-  // which are readily available here; rather than introduce significant refactoring,
-  // defer this fix until WhiskConfig is refactored itself, which is planned to introduce
-  // type safe properties
-  private val mainDdoc = WhiskConfig.readFromEnv(dbActivationsDesignDoc).getOrElse("whisks.v2")
-  private val filtersDdoc = WhiskConfig.readFromEnv(dbActivationsFilterDesignDoc).getOrElse("whisks-filters.v2")
+  private val dbConfig = loadConfigOrThrow[DBConfig](ConfigKeys.db)
+  private val mainDdoc = dbConfig.activationsDdoc
+  private val filtersDdoc = dbConfig.activationsFilterDdoc
 
   /** The main view for activations, keyed by namespace, sorted by date. */
   override lazy val view = WhiskEntityQueries.view(mainDdoc, collectionName)
@@ -162,7 +165,7 @@ object WhiskActivation
    * A view for activations in a namespace additionally keyed by action name
    * (and package name if present) sorted by date.
    */
-  private val filtersView = WhiskEntityQueries.view(filtersDdoc, collectionName)
+  lazy val filtersView = WhiskEntityQueries.view(filtersDdoc, collectionName)
 
   override implicit val serdes = jsonFormat13(WhiskActivation.apply)
 
@@ -193,4 +196,10 @@ object WhiskActivation
     val endKey = List(namespace.addPath(path).asString, upto map { _.toEpochMilli } getOrElse TOP, TOP)
     query(db, filtersView, startKey, endKey, skip, limit, reduce = false, stale, convert)
   }
+
+  def put[Wsuper >: WhiskActivation](db: ArtifactStore[Wsuper], doc: WhiskActivation)(
+    implicit transid: TransactionId,
+    notifier: Option[CacheChangeNotification]): Future[DocInfo] =
+    //As activations are not updated we just pass None for the old document
+    super.put(db, doc, None)
 }

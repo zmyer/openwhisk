@@ -34,7 +34,6 @@ import org.scalamock.scalatest.MockFactory
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.FlatSpec
 import whisk.core.containerpool.logging.{DockerToActivationLogStore, LogLine}
-
 import org.scalatest.junit.JUnitRunner
 import org.scalatest.Matchers
 import common.{StreamLogging, WskActorSystem}
@@ -49,8 +48,29 @@ import whisk.core.entity.ActivationResponse.ContainerResponse
 import whisk.core.entity.ActivationResponse.Timeout
 import whisk.core.entity.size._
 import whisk.http.Messages
+import DockerContainerTests._
+import whisk.core.entity.ExecManifest.ImageName
 
-import whisk.core.entity.size._
+object DockerContainerTests {
+
+  /** Awaits the given future, throws the exception enclosed in Failure. */
+  def await[A](f: Future[A], timeout: FiniteDuration = 500.milliseconds) = Await.result[A](f, timeout)
+
+  /** Creates an interval starting at EPOCH with the given duration. */
+  def intervalOf(duration: FiniteDuration) = Interval(Instant.EPOCH, Instant.ofEpochMilli(duration.toMillis))
+
+  def toRawLog(log: Seq[LogLine], appendSentinel: Boolean = true): ByteString = {
+    val appendedLog = if (appendSentinel) {
+      val lastTime = log.lastOption.map { case LogLine(time, _, _) => time }.getOrElse(Instant.EPOCH.toString)
+      log :+
+        LogLine(lastTime, "stderr", s"${DockerContainer.ActivationSentinel.utf8String}\n") :+
+        LogLine(lastTime, "stdout", s"${DockerContainer.ActivationSentinel.utf8String}\n")
+    } else {
+      log
+    }
+    ByteString(appendedLog.map(_.toJson.compactPrint).mkString("", "\n", "\n"))
+  }
+}
 
 /**
  * Unit tests for ContainerPool schedule
@@ -70,9 +90,6 @@ class DockerContainerTests
   }
 
   implicit val materializer: ActorMaterializer = ActorMaterializer()
-
-  /** Awaits the given future, throws the exception enclosed in Failure. */
-  def await[A](f: Future[A], timeout: FiniteDuration = 500.milliseconds) = Await.result[A](f, timeout)
 
   /** Reads logs into memory and awaits them */
   def awaitLogs(source: Source[ByteString, Any], timeout: FiniteDuration = 500.milliseconds): Vector[String] =
@@ -102,9 +119,6 @@ class DockerContainerTests
     }
   }
 
-  /** Creates an interval starting at EPOCH with the given duration. */
-  def intervalOf(duration: FiniteDuration) = Interval(Instant.EPOCH, Instant.ofEpochMilli(duration.toMillis))
-
   behavior of "DockerContainer"
 
   implicit val transid = TransactionId.testing
@@ -128,7 +142,7 @@ class DockerContainerTests
     val name = "myContainer"
     val container = DockerContainer.create(
       transid = transid,
-      image = image,
+      image = Right(image),
       memory = memory,
       cpuShares = cpuShares,
       environment = environment,
@@ -166,11 +180,8 @@ class DockerContainerTests
     implicit val docker = new TestDockerClient
     implicit val runc = stub[RuncApi]
 
-    val container = DockerContainer.create(
-      transid = transid,
-      image = "image",
-      userProvidedImage = true,
-      dockerRunParameters = parameters)
+    val container =
+      DockerContainer.create(transid = transid, image = Left(ImageName("image")), dockerRunParameters = parameters)
     await(container)
 
     docker.pulls should have size 1
@@ -189,7 +200,7 @@ class DockerContainerTests
     }
     implicit val runc = stub[RuncApi]
 
-    val container = DockerContainer.create(transid = transid, image = "image", dockerRunParameters = parameters)
+    val container = DockerContainer.create(transid = transid, image = Right("image"), dockerRunParameters = parameters)
     a[WhiskContainerStartupError] should be thrownBy await(container)
 
     docker.pulls should have size 0
@@ -208,11 +219,8 @@ class DockerContainerTests
     }
     implicit val runc = stub[RuncApi]
 
-    val container = DockerContainer.create(
-      transid = transid,
-      image = "image",
-      userProvidedImage = true,
-      dockerRunParameters = parameters)
+    val container =
+      DockerContainer.create(transid = transid, image = Left(ImageName("image")), dockerRunParameters = parameters)
     a[WhiskContainerStartupError] should be thrownBy await(container)
 
     docker.pulls should have size 1
@@ -231,11 +239,8 @@ class DockerContainerTests
     }
     implicit val runc = stub[RuncApi]
 
-    val container = DockerContainer.create(
-      transid = transid,
-      image = "image",
-      userProvidedImage = false,
-      dockerRunParameters = parameters)
+    val container =
+      DockerContainer.create(transid = transid, image = Right("image"), dockerRunParameters = parameters)
     a[WhiskContainerStartupError] should be thrownBy await(container)
 
     docker.pulls should have size 0
@@ -254,11 +259,8 @@ class DockerContainerTests
     }
     implicit val runc = stub[RuncApi]
 
-    val container = DockerContainer.create(
-      transid = transid,
-      image = "image",
-      userProvidedImage = true,
-      dockerRunParameters = parameters)
+    val container =
+      DockerContainer.create(transid = transid, image = Left(ImageName("image")), dockerRunParameters = parameters)
     a[WhiskContainerStartupError] should be thrownBy await(container)
 
     docker.pulls should have size 1
@@ -267,7 +269,7 @@ class DockerContainerTests
     docker.rms should have size 1
   }
 
-  it should "return a specific error if pulling a user provided image failed" in {
+  it should "return a specific error if pulling a user provided image failed (given the image does not define a tag)" in {
     implicit val docker = new TestDockerClient {
       override def pull(image: String)(implicit transid: TransactionId): Future[Unit] = {
         pulls += image
@@ -276,16 +278,64 @@ class DockerContainerTests
     }
     implicit val runc = stub[RuncApi]
 
-    val container = DockerContainer.create(
-      transid = transid,
-      image = "image",
-      userProvidedImage = true,
-      dockerRunParameters = parameters)
-    a[BlackboxStartupError] should be thrownBy await(container)
+    val imageName = "image"
+    val container =
+      DockerContainer.create(transid = transid, image = Left(ImageName(imageName)), dockerRunParameters = parameters)
+    val exception = the[BlackboxStartupError] thrownBy await(container)
+    exception.msg shouldBe Messages.imagePullError(imageName)
 
     docker.pulls should have size 1
-    docker.runs should have size 0
+    docker.runs should have size 0 // run is **not** called as a backup measure because no tag is defined
     docker.inspects should have size 0
+    docker.rms should have size 0
+  }
+
+  it should "recover a failed image pull if the subsequent docker run succeeds" in {
+    implicit val docker = new TestDockerClient {
+      override def pull(image: String)(implicit transid: TransactionId): Future[Unit] = {
+        pulls += image
+        Future.failed(new RuntimeException())
+      }
+    }
+    implicit val runc = stub[RuncApi]
+
+    val container =
+      DockerContainer.create(
+        transid = transid,
+        image = Left(ImageName("image", tag = Some("prod"))),
+        dockerRunParameters = parameters)
+
+    noException should be thrownBy await(container)
+
+    docker.pulls should have size 1
+    docker.runs should have size 1 // run is called as a backup measure in case the image is locally available
+    docker.inspects should have size 1
+    docker.rms should have size 0
+  }
+
+  it should "throw a pull exception if a recovering docker run fails as well" in {
+    implicit val docker = new TestDockerClient {
+      override def pull(image: String)(implicit transid: TransactionId): Future[Unit] = {
+        pulls += image
+        Future.failed(new RuntimeException())
+      }
+      override def run(image: String, args: Seq[String])(implicit transid: TransactionId): Future[ContainerId] = {
+        runs += ((image, args))
+        Future.failed(new RuntimeException())
+      }
+    }
+    implicit val runc = stub[RuncApi]
+
+    val imageName = ImageName("image", tag = Some("prod"))
+    val container =
+      DockerContainer.create(transid = transid, image = Left(imageName), dockerRunParameters = parameters)
+
+    val exception = the[BlackboxStartupError] thrownBy await(container)
+    exception.msg shouldBe Messages.imagePullError(imageName.publicImageName)
+
+    docker.pulls should have size 1
+    docker.runs should have size 1 // run is called as a backup measure in case the image is locally available
+    docker.inspects should have size 0 // inspect is never called because the run failed as well
     docker.rms should have size 0
   }
 
@@ -348,7 +398,7 @@ class DockerContainerTests
       Future.successful(RunResult(interval, Right(ContainerResponse(true, "", None))))
     }
 
-    val initInterval = container.initialize(JsObject(), initTimeout)
+    val initInterval = container.initialize(JsObject.empty, initTimeout)
     await(initInterval, initTimeout) shouldBe interval
 
     // assert the starting log is there
@@ -369,10 +419,10 @@ class DockerContainerTests
     val interval = intervalOf(initTimeout + 1.nanoseconds)
 
     val container = dockerContainer() {
-      Future.successful(RunResult(interval, Left(Timeout())))
+      Future.successful(RunResult(interval, Left(Timeout(new Throwable()))))
     }
 
-    val init = container.initialize(JsObject(), initTimeout)
+    val init = container.initialize(JsObject.empty, initTimeout)
 
     val error = the[InitializationError] thrownBy await(init, initTimeout)
     error.interval shouldBe interval
@@ -394,12 +444,12 @@ class DockerContainerTests
     implicit val runc = stub[RuncApi]
 
     val interval = intervalOf(1.millisecond)
-    val result = JsObject()
+    val result = JsObject.empty
     val container = dockerContainer() {
       Future.successful(RunResult(interval, Right(ContainerResponse(true, result.compactPrint, None))))
     }
 
-    val runResult = container.run(JsObject(), JsObject(), 1.second)
+    val runResult = container.run(JsObject.empty, JsObject.empty, 1.second)
     await(runResult) shouldBe (interval, ActivationResponse.success(Some(result)))
 
     // assert the starting log is there
@@ -420,10 +470,10 @@ class DockerContainerTests
     val interval = intervalOf(runTimeout + 1.nanoseconds)
 
     val container = dockerContainer() {
-      Future.successful(RunResult(interval, Left(Timeout())))
+      Future.successful(RunResult(interval, Left(Timeout(new Throwable()))))
     }
 
-    val runResult = container.run(JsObject(), JsObject(), runTimeout)
+    val runResult = container.run(JsObject.empty, JsObject.empty, runTimeout)
     await(runResult) shouldBe (interval, ActivationResponse.applicationError(
       Messages.timedoutActivation(runTimeout, false)))
 
@@ -435,18 +485,6 @@ class DockerContainerTests
   /*
    * LOGS
    */
-  def toRawLog(log: Seq[LogLine], appendSentinel: Boolean = true): ByteString = {
-    val appendedLog = if (appendSentinel) {
-      val lastTime = log.lastOption.map { case LogLine(time, _, _) => time }.getOrElse(Instant.EPOCH.toString)
-      log :+
-        LogLine(lastTime, "stderr", s"${DockerContainer.ActivationSentinel.utf8String}\n") :+
-        LogLine(lastTime, "stdout", s"${DockerContainer.ActivationSentinel.utf8String}\n")
-    } else {
-      log
-    }
-    ByteString(appendedLog.map(_.toJson.compactPrint).mkString("", "\n", "\n"))
-  }
-
   it should "read a simple log with sentinel" in {
     val expectedLogEntry = LogLine(Instant.EPOCH.toString, "stdout", "This is a log entry.\n")
     val rawLog = toRawLog(Seq(expectedLogEntry), appendSentinel = true)
@@ -583,8 +621,9 @@ class DockerContainerTests
 
     docker.rawContainerLogsInvocations should have size 1
 
-    processedLog should have size expectedLog.length
-    processedLog shouldBe expectedLog.map(_.toFormattedString)
+    processedLog should have size expectedLog.length + 1 //error log should be appended
+    processedLog.head shouldBe expectedLog.head.toFormattedString
+    processedLog(1) should include(Messages.logFailure)
   }
 
   it should "truncate logs and advance reading position to end of current read" in {

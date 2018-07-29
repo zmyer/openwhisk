@@ -1,3 +1,5 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more contributor
+# license agreements; and to You under the Apache License, Version 2.0.
 ---
 # provision_env.yml
 - name: create instances and hosts file
@@ -6,10 +8,10 @@
     - name: add header to hosts file
       copy:
         content: "; the first parameter in a host is the inventory_hostname\n\nansible ansible_connection=local\n"
-        dest: "{{inventory_dir}}/hosts"
+        dest: "{{hosts_dir}}/hosts"
 
     - name: Create instances
-      include: boot_instances_dist.yml instance={{item}}
+      import_tasks: boot_instances_dist.yml instance={{item}}
       with_items: instances
 
     - meta: refresh_inventory

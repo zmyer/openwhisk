@@ -18,15 +18,9 @@
 package whisk.core.connector
 
 import scala.util.Try
-
 import spray.json._
 import whisk.common.TransactionId
-import whisk.core.entity.ActivationId
-import whisk.core.entity.DocRevision
-import whisk.core.entity.FullyQualifiedEntityName
-import whisk.core.entity.Identity
-import whisk.core.entity.InstanceId
-import whisk.core.entity.WhiskActivation
+import whisk.core.entity._
 
 /** Basic trait for messages that are sent on a message bus connector. */
 trait Message {
@@ -52,25 +46,17 @@ case class ActivationMessage(override val transid: TransactionId,
                              revision: DocRevision,
                              user: Identity,
                              activationId: ActivationId,
-                             rootControllerIndex: InstanceId,
+                             rootControllerIndex: ControllerInstanceId,
                              blocking: Boolean,
                              content: Option[JsObject],
-                             cause: Option[ActivationId] = None)
+                             cause: Option[ActivationId] = None,
+                             traceContext: Option[Map[String, String]] = None)
     extends Message {
-
-  def meta =
-    JsObject("meta" -> {
-      cause map { c =>
-        JsObject(c.toJsObject.fields ++ activationId.toJsObject.fields)
-      } getOrElse {
-        activationId.toJsObject
-      }
-    })
 
   override def serialize = ActivationMessage.serdes.write(this).compactPrint
 
   override def toString = {
-    val value = (content getOrElse JsObject()).compactPrint
+    val value = (content getOrElse JsObject.empty).compactPrint
     s"$action?message=$value"
   }
 
@@ -82,7 +68,7 @@ object ActivationMessage extends DefaultJsonProtocol {
   def parse(msg: String) = Try(serdes.read(msg.parseJson))
 
   private implicit val fqnSerdes = FullyQualifiedEntityName.serdes
-  implicit val serdes = jsonFormat9(ActivationMessage.apply)
+  implicit val serdes = jsonFormat10(ActivationMessage.apply)
 }
 
 /**
@@ -91,7 +77,7 @@ object ActivationMessage extends DefaultJsonProtocol {
  */
 case class CompletionMessage(override val transid: TransactionId,
                              response: Either[ActivationId, WhiskActivation],
-                             invoker: InstanceId)
+                             invoker: InvokerInstanceId)
     extends Message {
 
   override def serialize: String = {
@@ -104,15 +90,112 @@ case class CompletionMessage(override val transid: TransactionId,
 }
 
 object CompletionMessage extends DefaultJsonProtocol {
+  implicit def eitherResponse =
+    new JsonFormat[Either[ActivationId, WhiskActivation]] {
+      def write(either: Either[ActivationId, WhiskActivation]) = either match {
+        case Right(a) => a.toJson
+        case Left(b)  => b.toJson
+      }
+
+      def read(value: JsValue) = value match {
+        // per the ActivationId's serializer, it is guaranteed to be a String even if it only consists of digits
+        case _: JsString => Left(value.convertTo[ActivationId])
+        case _: JsObject => Right(value.convertTo[WhiskActivation])
+        case _           => deserializationError("could not read CompletionMessage")
+      }
+    }
+
   def parse(msg: String): Try[CompletionMessage] = Try(serdes.read(msg.parseJson))
   private val serdes = jsonFormat3(CompletionMessage.apply)
 }
 
-case class PingMessage(instance: InstanceId) extends Message {
+case class PingMessage(instance: InvokerInstanceId) extends Message {
   override def serialize = PingMessage.serdes.write(this).compactPrint
 }
 
 object PingMessage extends DefaultJsonProtocol {
   def parse(msg: String) = Try(serdes.read(msg.parseJson))
   implicit val serdes = jsonFormat(PingMessage.apply _, "name")
+}
+
+trait EventMessageBody extends Message {
+  def typeName: String
+}
+
+object EventMessageBody extends DefaultJsonProtocol {
+
+  implicit def format = new JsonFormat[EventMessageBody] {
+    def write(eventMessageBody: EventMessageBody) = eventMessageBody match {
+      case m: Metric     => m.toJson
+      case a: Activation => a.toJson
+    }
+
+    def read(value: JsValue) =
+      if (value.asJsObject.fields.contains("metricName")) {
+        value.convertTo[Metric]
+      } else {
+        value.convertTo[Activation]
+      }
+  }
+}
+
+case class Activation(name: String,
+                      statusCode: Int,
+                      duration: Long,
+                      waitTime: Long,
+                      initTime: Long,
+                      kind: String,
+                      conductor: Boolean,
+                      memory: Int,
+                      causedBy: Boolean)
+    extends EventMessageBody {
+  val typeName = "Activation"
+  override def serialize = toJson.compactPrint
+
+  def toJson = Activation.activationFormat.write(this)
+}
+
+object Activation extends DefaultJsonProtocol {
+  def parse(msg: String) = Try(activationFormat.read(msg.parseJson))
+  implicit val activationFormat =
+    jsonFormat(
+      Activation.apply _,
+      "name",
+      "statusCode",
+      "duration",
+      "waitTime",
+      "initTime",
+      "kind",
+      "conductor",
+      "memory",
+      "causedBy")
+}
+
+case class Metric(metricName: String, metricValue: Long) extends EventMessageBody {
+  val typeName = "Metric"
+  override def serialize = toJson.compactPrint
+  def toJson = Metric.metricFormat.write(this).asJsObject
+}
+
+object Metric extends DefaultJsonProtocol {
+  def parse(msg: String) = Try(metricFormat.read(msg.parseJson))
+  implicit val metricFormat = jsonFormat(Metric.apply _, "metricName", "metricValue")
+}
+
+case class EventMessage(source: String,
+                        body: EventMessageBody,
+                        subject: Subject,
+                        namespace: String,
+                        userId: UUID,
+                        eventType: String,
+                        timestamp: Long = System.currentTimeMillis())
+    extends Message {
+  override def serialize = EventMessage.format.write(this).compactPrint
+}
+
+object EventMessage extends DefaultJsonProtocol {
+  implicit val format =
+    jsonFormat(EventMessage.apply _, "source", "body", "subject", "namespace", "userId", "eventType", "timestamp")
+
+  def parse(msg: String) = format.read(msg.parseJson)
 }

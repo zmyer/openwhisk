@@ -33,10 +33,13 @@ import akka.http.scaladsl.model.StatusCodes
 import akka.http.scaladsl.unmarshalling.Unmarshal
 import akka.stream.ActorMaterializer
 import common._
-import common.rest.WskRest
+import common.rest.{HttpConnection, WskRestOperations}
+import pureconfig._
 import spray.json._
 import spray.json.DefaultJsonProtocol._
 import whisk.core.WhiskConfig
+import whisk.core.ConfigKeys
+import whisk.core.database.CouchDbConfig
 import whisk.core.database.test.ExtendedCouchDbRestClient
 import whisk.utils.retry
 
@@ -47,67 +50,46 @@ class ShootComponentsTests
     with WskTestHelpers
     with ScalaFutures
     with WskActorSystem
-    with StreamLogging {
+    with StreamLogging
+    with ShootComponentUtils {
 
   implicit val wskprops = WskProps()
-  val wsk = new WskRest
+  val wsk = new WskRestOperations
   val defaultAction = Some(TestUtils.getTestActionFilename("hello.js"))
 
   implicit val materializer = ActorMaterializer()
   implicit val testConfig = PatienceConfig(1.minute)
 
+  val controllerProtocol = loadConfigOrThrow[String]("whisk.controller.protocol")
+
   // Throttle requests to the remaining controllers to avoid getting 429s. (60 req/min)
   val amountOfControllers = WhiskProperties.getProperty(WhiskConfig.controllerInstances).toInt
-  val limit = WhiskProperties.getProperty(WhiskConfig.actionInvokeConcurrentLimit).toDouble
+  val limit = WhiskProperties.getProperty(WhiskConfig.actionInvokePerMinuteLimit).toDouble
   val limitPerController = limit / amountOfControllers
   val allowedRequestsPerMinute = (amountOfControllers - 1.0) * limitPerController
   val timeBeweenRequests = 60.seconds / allowedRequestsPerMinute
 
-  val controller0DockerHost = WhiskProperties.getBaseControllerHost() + ":" + WhiskProperties.getProperty(
-    WhiskConfig.dockerPort)
+  val controller0DockerHost = WhiskProperties.getBaseControllerHost()
+  val couchDB0DockerHost = WhiskProperties.getBaseDBHost()
 
-  val couchDB0DockerHost = WhiskProperties.getBaseDBHost() + ":" + WhiskProperties.getProperty(WhiskConfig.dockerPort)
-
-  val dbProtocol = WhiskProperties.getProperty(WhiskConfig.dbProtocol)
+  val dbConfig = loadConfigOrThrow[CouchDbConfig](ConfigKeys.couchdb)
+  val dbProtocol = dbConfig.protocol
   val dbHostsList = WhiskProperties.getDBHosts
-  val dbPort = WhiskProperties.getProperty(WhiskConfig.dbPort)
-  val dbUsername = WhiskProperties.getProperty(WhiskConfig.dbUsername)
-  val dbPassword = WhiskProperties.getProperty(WhiskConfig.dbPassword)
-  val dbPrefix = WhiskProperties.getProperty(WhiskConfig.dbPrefix)
-  val dbWhiskAuth = WhiskProperties.getProperty(WhiskConfig.dbAuths)
-
-  private def getDockerCommand(host: String, component: String, cmd: String) = {
-    def file(path: String) = Try(new File(path)).filter(_.exists).map(_.getAbsolutePath).toOption
-
-    val docker = (file("/usr/bin/docker") orElse file("/usr/local/bin/docker")).getOrElse("docker")
-
-    Seq(docker, "--host", host, cmd, component)
-  }
-
-  def restartComponent(host: String, component: String) = {
-    val cmd: Seq[String] = getDockerCommand(host, component, "restart")
-    println(s"Running command: ${cmd.mkString(" ")}")
-
-    TestUtils.runCmd(0, new File("."), cmd: _*)
-  }
-
-  def stopComponent(host: String, component: String) = {
-    val cmd: Seq[String] = getDockerCommand(host, component, "stop")
-    println(s"Running command: ${cmd.mkString(" ")}")
-
-    TestUtils.runCmd(0, new File("."), cmd: _*)
-  }
-
-  def startComponent(host: String, component: String) = {
-    val cmd: Seq[String] = getDockerCommand(host, component, "start")
-    println(s"Running command: ${cmd.mkString(" ")}")
-
-    TestUtils.runCmd(0, new File("."), cmd: _*)
-  }
+  val dbPort = dbConfig.port
+  val dbUsername = dbConfig.username
+  val dbPassword = dbConfig.password
+  val dbWhiskAuth = dbConfig.databases.get("WhiskAuth").get
 
   def ping(host: String, port: Int, path: String = "/") = {
+
+    val connectionContext = HttpConnection.getContext(controllerProtocol)
+
     val response = Try {
-      Http().singleRequest(HttpRequest(uri = s"http://$host:$port$path")).futureValue
+      Http()
+        .singleRequest(
+          HttpRequest(uri = s"$controllerProtocol://$host:$port$path"),
+          connectionContext = connectionContext)
+        .futureValue
     }.toOption
 
     response.map { res =>
@@ -129,7 +111,7 @@ class ShootComponentsTests
     require(instance >= 0 && instance < 2, "DB instance not known.")
 
     val host = WhiskProperties.getProperty("db.hosts").split(",")(instance)
-    val port = WhiskProperties.getDBPort + instance
+    val port = dbPort + instance
 
     val res = ping(host, port)
     res == Some(
@@ -187,11 +169,11 @@ class ShootComponentsTests
       val requests = requestsBeforeRestart ++ requestsAfterRestart
 
       val unsuccessfulInvokes = requests.map(_._1).count(_ != TestUtils.SUCCESS_EXIT)
-      // Allow 3 failures for the 100 seconds
-      unsuccessfulInvokes should be <= 3
+      // Allow 5 failures for the 100 seconds
+      unsuccessfulInvokes should be <= 5
 
       val unsuccessfulGets = requests.map(_._2).count(_ != TestUtils.SUCCESS_EXIT)
-      // Only allow 1 failure in GET requests, because they are idempotent and they should be passed to the next controller if one crashes
+      // Allow no failures in GET requests, because they are idempotent and they should be passed to the next controller if one crashes
       unsuccessfulGets shouldBe 0
 
       // Check that both controllers are up
@@ -315,5 +297,37 @@ class ShootComponentsTests
           result should be('left)
         })
       }
+  }
+}
+
+trait ShootComponentUtils {
+  private def getDockerCommand(host: String, component: String, cmd: String) = {
+    def file(path: String) = Try(new File(path)).filter(_.exists).map(_.getAbsolutePath).toOption
+
+    val docker = (file("/usr/bin/docker") orElse file("/usr/local/bin/docker")).getOrElse("docker")
+    val dockerPort = WhiskProperties.getProperty(WhiskConfig.dockerPort)
+
+    Seq(docker, "--host", host + ":" + dockerPort, cmd, component)
+  }
+
+  def restartComponent(host: String, component: String) = {
+    val cmd: Seq[String] = getDockerCommand(host, component, "restart")
+    println(s"Running command: ${cmd.mkString(" ")}")
+
+    TestUtils.runCmd(0, new File("."), cmd: _*)
+  }
+
+  def stopComponent(host: String, component: String) = {
+    val cmd: Seq[String] = getDockerCommand(host, component, "stop")
+    println(s"Running command: ${cmd.mkString(" ")}")
+
+    TestUtils.runCmd(0, new File("."), cmd: _*)
+  }
+
+  def startComponent(host: String, component: String) = {
+    val cmd: Seq[String] = getDockerCommand(host, component, "start")
+    println(s"Running command: ${cmd.mkString(" ")}")
+
+    TestUtils.runCmd(0, new File("."), cmd: _*)
   }
 }

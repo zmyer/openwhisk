@@ -20,14 +20,14 @@ package whisk.core.cli.test
 import org.junit.runner.RunWith
 import org.scalatest.junit.JUnitRunner
 import spray.json._
-
-import common.rest.WskRest
+import common.rest.WskRestOperations
 import common.rest.RestResult
 import common.TestUtils.RunResult
+import common.WskActorSystem
 
 @RunWith(classOf[JUnitRunner])
-class WskRestActionSequenceTests extends WskActionSequenceTests {
-  override lazy val wsk: common.rest.WskRest = new WskRest
+class WskRestActionSequenceTests extends WskActionSequenceTests with WskActorSystem {
+  override lazy val wsk = new WskRestOperations
 
   override def verifyActionSequence(action: RunResult, name: String, compValue: JsArray, kindValue: JsString): Unit = {
     val actionResultRest = action.asInstanceOf[RestResult]

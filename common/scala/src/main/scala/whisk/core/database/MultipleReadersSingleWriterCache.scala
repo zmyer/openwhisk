@@ -15,21 +15,14 @@
  * limitations under the License.
  */
 
-/*
- * Cache base implementation:
- * Copyright (C) 2017 Lightbend Inc. <http://www.lightbend.com/>
- */
-
 package whisk.core.database
 
-import java.util.concurrent.{ConcurrentMap, TimeUnit}
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 import scala.concurrent.{ExecutionContext, Future, Promise}
-import scala.language.implicitConversions
 import scala.util.Failure
 import scala.util.Success
-import scala.util.control.NonFatal
 import com.github.benmanes.caffeine.cache.Caffeine
 import whisk.common.Logging
 import whisk.common.LoggingMarkers
@@ -91,12 +84,18 @@ private object MultipleReadersSingleWriterCache {
 
 trait CacheChangeNotification extends (CacheKey => Future[Unit])
 
+sealed trait EvictionPolicy
+
+case object AccessTime extends EvictionPolicy
+case object WriteTime extends EvictionPolicy
+
 trait MultipleReadersSingleWriterCache[W, Winfo] {
   import MultipleReadersSingleWriterCache._
   import MultipleReadersSingleWriterCache.State._
 
   /** Subclasses: Toggle this to enable/disable caching for your entity type. */
   protected val cacheEnabled = true
+  protected val evictionPolicy: EvictionPolicy = AccessTime
 
   private object Entry {
     def apply(transid: TransactionId, state: State, value: Option[Future[W]]): Entry = {
@@ -255,10 +254,18 @@ trait MultipleReadersSingleWriterCache[W, Winfo] {
     } else generator // not caching
   }
 
+  protected def cacheUpdate(doc: W, key: CacheKey, generator: => Future[Winfo])(
+    implicit ec: ExecutionContext,
+    transid: TransactionId,
+    logger: Logging,
+    notifier: Option[CacheChangeNotification]): Future[Winfo] = {
+    cacheUpdate(Future.successful(doc), key, generator)
+  }
+
   /**
    * This method posts an update to the backing store, and potentially stores the result in the cache.
    */
-  protected def cacheUpdate(doc: W, key: CacheKey, generator: => Future[Winfo])(
+  protected def cacheUpdate(f: Future[W], key: CacheKey, generator: => Future[Winfo])(
     implicit ec: ExecutionContext,
     transid: TransactionId,
     logger: Logging,
@@ -266,7 +273,7 @@ trait MultipleReadersSingleWriterCache[W, Winfo] {
     if (cacheEnabled) {
 
       // try inserting our desired entry...
-      val desiredEntry = Entry(transid, WriteInProgress, Some(Future.successful(doc)))
+      val desiredEntry = Entry(transid, WriteInProgress, Some(f))
       cache(key)(desiredEntry) flatMap { actualEntry =>
         // ... and see what we get back
 
@@ -309,7 +316,7 @@ trait MultipleReadersSingleWriterCache[W, Winfo] {
    *
    */
   private def makeNoteOfCacheHit(key: CacheKey)(implicit transid: TransactionId, logger: Logging) = {
-    transid.mark(this, LoggingMarkers.DATABASE_CACHE_HIT, s"[GET] serving from cache: $key")(logger)
+    transid.started(this, LoggingMarkers.DATABASE_CACHE_HIT, s"[GET] serving from cache: $key")(logger)
   }
 
   /**
@@ -317,7 +324,7 @@ trait MultipleReadersSingleWriterCache[W, Winfo] {
    *
    */
   private def makeNoteOfCacheMiss(key: CacheKey)(implicit transid: TransactionId, logger: Logging) = {
-    transid.mark(this, LoggingMarkers.DATABASE_CACHE_MISS, s"[GET] serving from datastore: $key")(logger)
+    transid.started(this, LoggingMarkers.DATABASE_CACHE_MISS, s"[GET] serving from datastore: $key")(logger)
   }
 
   /**
@@ -438,60 +445,25 @@ trait MultipleReadersSingleWriterCache[W, Winfo] {
   }
 
   /** This is the backing store. */
-  private val cache: ConcurrentMapBackedCache[Entry] = new ConcurrentMapBackedCache(
-    Caffeine
-      .newBuilder()
-      .asInstanceOf[Caffeine[Any, Future[Entry]]]
-      .expireAfterWrite(5, TimeUnit.MINUTES)
-      .softValues()
-      .build()
-      .asMap())
-}
+  private lazy val cache: ConcurrentMapBackedCache[Entry] = evictionPolicy match {
+    case AccessTime =>
+      new ConcurrentMapBackedCache(
+        Caffeine
+          .newBuilder()
+          .asInstanceOf[Caffeine[Any, Future[Entry]]]
+          .expireAfterAccess(5, TimeUnit.MINUTES)
+          .softValues()
+          .build()
+          .asMap())
 
-/**
- * A thread-safe implementation of [[spray.caching.cache]] backed by a plain
- * [[java.util.concurrent.ConcurrentMap]].
- *
- * The implementation is entirely copied from Spray's [[spray.caching.Cache]] and
- * [[spray.caching.SimpleLruCache]] respectively, the only difference being the store type.
- * Implementation otherwise is identical.
- */
-private class ConcurrentMapBackedCache[V](store: ConcurrentMap[Any, Future[V]]) {
-  val cache = this
-
-  def apply(key: Any) = new Keyed(key)
-
-  class Keyed(key: Any) {
-    def apply(magnet: => ValueMagnet[V])(implicit ec: ExecutionContext): Future[V] =
-      cache.apply(
-        key,
-        () =>
-          try magnet.future
-          catch { case NonFatal(e) => Future.failed(e) })
+    case _ =>
+      new ConcurrentMapBackedCache(
+        Caffeine
+          .newBuilder()
+          .asInstanceOf[Caffeine[Any, Future[Entry]]]
+          .expireAfterWrite(5, TimeUnit.MINUTES)
+          .softValues()
+          .build()
+          .asMap())
   }
-
-  def apply(key: Any, genValue: () => Future[V])(implicit ec: ExecutionContext): Future[V] = {
-    store.computeIfAbsent(
-      key,
-      new java.util.function.Function[Any, Future[V]]() {
-        override def apply(key: Any): Future[V] = {
-          val future = genValue()
-          future.onComplete { value =>
-            // in case of exceptions we remove the cache entry (i.e. try again later)
-            if (value.isFailure) store.remove(key, future)
-          }
-          future
-        }
-      })
-  }
-
-  def remove(key: Any) = Option(store.remove(key))
-
-  def size = store.size
-}
-
-class ValueMagnet[V](val future: Future[V])
-object ValueMagnet {
-  implicit def fromAny[V](block: V): ValueMagnet[V] = fromFuture(Future.successful(block))
-  implicit def fromFuture[V](future: Future[V]): ValueMagnet[V] = new ValueMagnet(future)
 }

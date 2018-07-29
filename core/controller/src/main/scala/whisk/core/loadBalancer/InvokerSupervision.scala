@@ -20,29 +20,24 @@ package whisk.core.loadBalancer
 import java.nio.charset.StandardCharsets
 
 import scala.collection.immutable
-import scala.concurrent.Future
+import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.concurrent.duration._
 import scala.util.Failure
 import scala.util.Success
 import org.apache.kafka.clients.producer.RecordMetadata
-import akka.actor.Actor
-import akka.actor.ActorRef
-import akka.actor.ActorRefFactory
-import akka.actor.FSM
+import akka.actor.{Actor, ActorRef, ActorRefFactory, FSM, Props}
 import akka.actor.FSM.CurrentState
 import akka.actor.FSM.SubscribeTransitionCallBack
 import akka.actor.FSM.Transition
-import akka.actor.Props
 import akka.pattern.pipe
 import akka.util.Timeout
-import whisk.common.AkkaLogging
-import whisk.common.LoggingMarkers
-import whisk.common.RingBuffer
-import whisk.common.TransactionId
+import whisk.common._
 import whisk.core.connector._
+import whisk.core.database.NoDocumentException
 import whisk.core.entitlement.Privilege
 import whisk.core.entity.ActivationId.ActivationIdGenerator
 import whisk.core.entity._
+import whisk.core.entity.types.EntityStore
 
 // Received events
 case object GetStatus
@@ -50,16 +45,47 @@ case object GetStatus
 case object Tick
 
 // States an Invoker can be in
-sealed trait InvokerState { val asString: String }
-case object Offline extends InvokerState { val asString = "down" }
-case object Healthy extends InvokerState { val asString = "up" }
-case object UnHealthy extends InvokerState { val asString = "unhealthy" }
+sealed trait InvokerState {
+  val asString: String
+  val isUsable: Boolean
+}
 
-case class ActivationRequest(msg: ActivationMessage, invoker: InstanceId)
-case class InvocationFinishedMessage(invokerInstance: InstanceId, successful: Boolean)
+object InvokerState {
+  // Invokers in this state can be used to schedule workload to
+  sealed trait Usable extends InvokerState { val isUsable = true }
+  // No workload should be scheduled to invokers in this state
+  sealed trait Unusable extends InvokerState { val isUsable = false }
+
+  // A completely healthy invoker, pings arriving fine, no system errors
+  case object Healthy extends Usable { val asString = "up" }
+  // Pings are arriving fine, the invoker returns system errors though
+  case object Unhealthy extends Unusable { val asString = "unhealthy" }
+  // Pings are arriving fine, the invoker does not respond with active-acks in the expected time though
+  case object Unresponsible extends Unusable { val asString = "unresponsible" }
+  // Pings are not arriving for this invoker
+  case object Offline extends Unusable { val asString = "down" }
+}
+
+// Possible answers of an activation
+sealed trait InvocationFinishedResult
+object InvocationFinishedResult {
+  // The activation could be successfully executed from the system's point of view. That includes user- and application
+  // errors
+  case object Success extends InvocationFinishedResult
+  // The activation could not be executed because of a system error
+  case object SystemError extends InvocationFinishedResult
+  // The active-ack did not arrive before it timed out
+  case object Timeout extends InvocationFinishedResult
+}
+
+case class ActivationRequest(msg: ActivationMessage, invoker: InvokerInstanceId)
+case class InvocationFinishedMessage(invokerInstance: InvokerInstanceId, result: InvocationFinishedResult)
+
+// Sent to a monitor if the state changed
+case class CurrentInvokerPoolState(newState: IndexedSeq[InvokerHealth])
 
 // Data stored in the Invoker
-final case class InvokerInfo(buffer: RingBuffer[Boolean])
+final case class InvokerInfo(buffer: RingBuffer[InvocationFinishedResult])
 
 /**
  * Actor representing a pool of invokers
@@ -72,23 +98,26 @@ final case class InvokerInfo(buffer: RingBuffer[Boolean])
  * Note: An Invoker that never sends an initial Ping will not be considered
  * by the InvokerPool and thus might not be caught by monitoring.
  */
-class InvokerPool(childFactory: (ActorRefFactory, InstanceId) => ActorRef,
-                  sendActivationToInvoker: (ActivationMessage, InstanceId) => Future[RecordMetadata],
-                  pingConsumer: MessageConsumer)
+class InvokerPool(childFactory: (ActorRefFactory, InvokerInstanceId) => ActorRef,
+                  sendActivationToInvoker: (ActivationMessage, InvokerInstanceId) => Future[RecordMetadata],
+                  pingConsumer: MessageConsumer,
+                  monitor: Option[ActorRef])
     extends Actor {
 
-  implicit val transid = TransactionId.invokerHealth
-  implicit val logging = new AkkaLogging(context.system.log)
-  implicit val timeout = Timeout(5.seconds)
-  implicit val ec = context.dispatcher
+  import InvokerState._
+
+  implicit val transid: TransactionId = TransactionId.invokerHealth
+  implicit val logging: Logging = new AkkaLogging(context.system.log)
+  implicit val timeout: Timeout = Timeout(5.seconds)
+  implicit val ec: ExecutionContext = context.dispatcher
 
   // State of the actor. Mutable vars with immutable collections prevents closures or messages
   // from leaking the state for external mutation
-  var instanceToRef = immutable.Map.empty[InstanceId, ActorRef]
-  var refToInstance = immutable.Map.empty[ActorRef, InstanceId]
-  var status = IndexedSeq[(InstanceId, InvokerState)]()
+  var instanceToRef = immutable.Map.empty[InvokerInstanceId, ActorRef]
+  var refToInstance = immutable.Map.empty[ActorRef, InvokerInstanceId]
+  var status = IndexedSeq[InvokerHealth]()
 
-  def receive = {
+  def receive: Receive = {
     case p: PingMessage =>
       val invoker = instanceToRef.getOrElse(p.instance, registerInvoker(p.instance))
       instanceToRef = instanceToRef.updated(p.instance, invoker)
@@ -103,13 +132,13 @@ class InvokerPool(childFactory: (ActorRefFactory, InstanceId) => ActorRef,
 
     case CurrentState(invoker, currentState: InvokerState) =>
       refToInstance.get(invoker).foreach { instance =>
-        status = status.updated(instance.toInt, (instance, currentState))
+        status = status.updated(instance.toInt, new InvokerHealth(instance, currentState))
       }
       logStatus()
 
     case Transition(invoker, oldState: InvokerState, newState: InvokerState) =>
       refToInstance.get(invoker).foreach { instance =>
-        status = status.updated(instance.toInt, (instance, newState))
+        status = status.updated(instance.toInt, new InvokerHealth(instance, newState))
       }
       logStatus()
 
@@ -117,14 +146,15 @@ class InvokerPool(childFactory: (ActorRefFactory, InstanceId) => ActorRef,
     case msg: ActivationRequest => sendActivationToInvoker(msg.msg, msg.invoker).pipeTo(sender)
   }
 
-  def logStatus() = {
-    val pretty = status.map { case (instance, state) => s"${instance.toInt} -> $state" }
+  def logStatus(): Unit = {
+    monitor.foreach(_ ! CurrentInvokerPoolState(status))
+    val pretty = status.map(i => s"${i.id.toInt} -> ${i.status}")
     logging.info(this, s"invoker status changed to ${pretty.mkString(", ")}")
   }
 
   /** Receive Ping messages from invokers. */
-  val pingPollDuration = 1.second
-  val invokerPingFeed = context.system.actorOf(Props {
+  val pingPollDuration: FiniteDuration = 1.second
+  val invokerPingFeed: ActorRef = context.system.actorOf(Props {
     new MessageFeed(
       "ping",
       logging,
@@ -149,13 +179,13 @@ class InvokerPool(childFactory: (ActorRefFactory, InstanceId) => ActorRef,
   }
 
   /** Pads a list to a given length using the given function to compute entries */
-  def padToIndexed[A](list: IndexedSeq[A], n: Int, f: (Int) => A) = list ++ (list.size until n).map(f)
+  def padToIndexed[A](list: IndexedSeq[A], n: Int, f: (Int) => A): IndexedSeq[A] = list ++ (list.size until n).map(f)
 
   // Register a new invoker
-  def registerInvoker(instanceId: InstanceId): ActorRef = {
+  def registerInvoker(instanceId: InvokerInstanceId): ActorRef = {
     logging.info(this, s"registered a new invoker: invoker${instanceId.toInt}")(TransactionId.invokerHealth)
 
-    status = padToIndexed(status, instanceId.toInt + 1, i => (InstanceId(i), Offline))
+    status = padToIndexed(status, instanceId.toInt + 1, i => new InvokerHealth(InvokerInstanceId(i), Offline))
 
     val ref = childFactory(context, instanceId)
 
@@ -169,25 +199,74 @@ class InvokerPool(childFactory: (ActorRefFactory, InstanceId) => ActorRef,
 }
 
 object InvokerPool {
-  def props(f: (ActorRefFactory, InstanceId) => ActorRef,
-            p: (ActivationMessage, InstanceId) => Future[RecordMetadata],
-            pc: MessageConsumer) = {
-    Props(new InvokerPool(f, p, pc))
+  private def createTestActionForInvokerHealth(db: EntityStore, action: WhiskAction): Future[Unit] = {
+    implicit val tid: TransactionId = TransactionId.loadbalancer
+    implicit val ec: ExecutionContext = db.executionContext
+    implicit val logging: Logging = db.logging
+
+    WhiskAction
+      .get(db, action.docid)
+      .flatMap { oldAction =>
+        WhiskAction.put(db, action.revision(oldAction.rev), Some(oldAction))(tid, notifier = None)
+      }
+      .recover {
+        case _: NoDocumentException => WhiskAction.put(db, action, old = None)(tid, notifier = None)
+      }
+      .map(_ => {})
+      .andThen {
+        case Success(_) => logging.info(this, "test action for invoker health now exists")
+        case Failure(e) => logging.error(this, s"error creating test action for invoker health: $e")
+      }
+  }
+
+  /**
+   * Prepares everything for the health protocol to work (i.e. creates a testaction)
+   *
+   * @param controllerInstance instance of the controller we run in
+   * @param entityStore store to write the action to
+   * @return throws an exception on failure to prepare
+   */
+  def prepare(controllerInstance: ControllerInstanceId, entityStore: EntityStore): Unit = {
+    InvokerPool
+      .healthAction(controllerInstance)
+      .map {
+        // Await the creation of the test action; on failure, this will abort the constructor which should
+        // in turn abort the startup of the controller.
+        a =>
+          Await.result(createTestActionForInvokerHealth(entityStore, a), 1.minute)
+      }
+      .orElse {
+        throw new IllegalStateException(
+          "cannot create test action for invoker health because runtime manifest is not valid")
+      }
+  }
+
+  def props(f: (ActorRefFactory, InvokerInstanceId) => ActorRef,
+            p: (ActivationMessage, InvokerInstanceId) => Future[RecordMetadata],
+            pc: MessageConsumer,
+            m: Option[ActorRef] = None): Props = {
+    Props(new InvokerPool(f, p, pc, m))
   }
 
   /** A stub identity for invoking the test action. This does not need to be a valid identity. */
-  val healthActionIdentity = {
+  val healthActionIdentity: Identity = {
     val whiskSystem = "whisk.system"
-    Identity(Subject(whiskSystem), EntityName(whiskSystem), AuthKey(UUID(), Secret()), Set[Privilege]())
+    val uuid = UUID()
+    Identity(
+      Subject(whiskSystem),
+      Namespace(EntityName(whiskSystem), uuid),
+      BasicAuthenticationAuthKey(uuid, Secret()),
+      Set[Privilege]())
   }
 
   /** An action to use for monitoring invoker health. */
-  def healthAction(i: InstanceId) = ExecManifest.runtimesManifest.resolveDefaultRuntime("nodejs:6").map { manifest =>
-    new WhiskAction(
-      namespace = healthActionIdentity.namespace.toPath,
-      name = EntityName(s"invokerHealthTestAction${i.toInt}"),
-      exec = CodeExecAsString(manifest, """function main(params) { return params; }""", None))
-  }
+  def healthAction(i: ControllerInstanceId): Option[WhiskAction] =
+    ExecManifest.runtimesManifest.resolveDefaultRuntime("nodejs:6").map { manifest =>
+      new WhiskAction(
+        namespace = healthActionIdentity.namespace.name.toPath,
+        name = EntityName(s"invokerHealthTestAction${i.asString}"),
+        exec = CodeExecAsString(manifest, """function main(params) { return params; }""", None))
+    }
 }
 
 /**
@@ -196,48 +275,49 @@ object InvokerPool {
  * This finite state-machine represents an Invoker in its possible
  * states "Healthy" and "Offline".
  */
-class InvokerActor(invokerInstance: InstanceId, controllerInstance: InstanceId) extends FSM[InvokerState, InvokerInfo] {
-  implicit val transid = TransactionId.invokerHealth
-  implicit val logging = new AkkaLogging(context.system.log)
+class InvokerActor(invokerInstance: InvokerInstanceId, controllerInstance: ControllerInstanceId)
+    extends FSM[InvokerState, InvokerInfo] {
+
+  import InvokerState._
+
+  implicit val transid: TransactionId = TransactionId.invokerHealth
+  implicit val logging: Logging = new AkkaLogging(context.system.log)
   val name = s"invoker${invokerInstance.toInt}"
 
-  val healthyTimeout = 10.seconds
+  val healthyTimeout: FiniteDuration = 10.seconds
 
   // This is done at this point to not intermingle with the state-machine
   // especially their timeouts.
   def customReceive: Receive = {
     case _: RecordMetadata => // The response of putting testactions to the MessageProducer. We don't have to do anything with them.
   }
-  override def receive = customReceive.orElse(super.receive)
+  override def receive: Receive = customReceive.orElse(super.receive)
 
-  /**
-   *  Always start UnHealthy. Then the invoker receives some test activations and becomes Healthy.
-   */
-  startWith(UnHealthy, InvokerInfo(new RingBuffer[Boolean](InvokerActor.bufferSize)))
+  /** Always start UnHealthy. Then the invoker receives some test activations and becomes Healthy. */
+  startWith(Unhealthy, InvokerInfo(new RingBuffer[InvocationFinishedResult](InvokerActor.bufferSize)))
 
-  /**
-   * An Offline invoker represents an existing but broken
-   * invoker. This means, that it does not send pings anymore.
-   */
+  /** An Offline invoker represents an existing but broken invoker. This means, that it does not send pings anymore. */
   when(Offline) {
-    case Event(_: PingMessage, _) => goto(UnHealthy)
+    case Event(_: PingMessage, _) => goto(Unhealthy)
   }
 
-  /**
-   * An UnHealthy invoker represents an invoker that was not able to handle actions successfully.
-   */
-  when(UnHealthy, stateTimeout = healthyTimeout) {
+  // To be used for all states that should send test actions to reverify the invoker
+  val healthPingingState: StateFunction = {
     case Event(_: PingMessage, _) => stay
     case Event(StateTimeout, _)   => goto(Offline)
-    case Event(Tick, info) => {
+    case Event(Tick, _) =>
       invokeTestAction()
       stay
-    }
   }
 
+  /** An Unhealthy invoker represents an invoker that was not able to handle actions successfully. */
+  when(Unhealthy, stateTimeout = healthyTimeout)(healthPingingState)
+
+  /** An Unresponsible invoker represents an invoker that is not responding with active acks in a timely manner */
+  when(Unresponsible, stateTimeout = healthyTimeout)(healthPingingState)
+
   /**
-   * A Healthy invoker is characterized by continuously getting
-   * pings. It will go offline if that state is not confirmed
+   * A Healthy invoker is characterized by continuously getting pings. It will go offline if that state is not confirmed
    * for 20 seconds.
    */
   when(Healthy, stateTimeout = healthyTimeout) {
@@ -245,38 +325,32 @@ class InvokerActor(invokerInstance: InstanceId, controllerInstance: InstanceId) 
     case Event(StateTimeout, _)   => goto(Offline)
   }
 
-  /**
-   * Handle the completion of an Activation in every state.
-   */
+  /** Handle the completion of an Activation in every state. */
   whenUnhandled {
-    case Event(cm: InvocationFinishedMessage, info) => handleCompletionMessage(cm.successful, info.buffer)
+    case Event(cm: InvocationFinishedMessage, info) => handleCompletionMessage(cm.result, info.buffer)
   }
 
   /** Logging on Transition change */
   onTransition {
-    case _ -> Offline =>
+    case _ -> newState if !newState.isUsable =>
       transid.mark(
         this,
-        LoggingMarkers.LOADBALANCER_INVOKER_OFFLINE,
-        s"$name is offline",
+        LoggingMarkers.LOADBALANCER_INVOKER_STATUS_CHANGE(newState.asString),
+        s"$name is ${newState.asString}",
         akka.event.Logging.WarningLevel)
-    case _ -> UnHealthy =>
-      transid.mark(
-        this,
-        LoggingMarkers.LOADBALANCER_INVOKER_UNHEALTHY,
-        s"$name is unhealthy",
-        akka.event.Logging.WarningLevel)
-    case _ -> Healthy => logging.info(this, s"$name is healthy")
+    case _ -> newState if newState.isUsable => logging.info(this, s"$name is ${newState.asString}")
   }
 
-  /** Scheduler to send test activations when the invoker is unhealthy. */
-  onTransition {
-    case _ -> UnHealthy => {
+  // To be used for all states that should send test actions to reverify the invoker
+  def healthPingingTransitionHandler(state: InvokerState): TransitionHandler = {
+    case _ -> `state` =>
       invokeTestAction()
-      setTimer(InvokerActor.timerName, Tick, 1.minute, true)
-    }
-    case UnHealthy -> _ => cancelTimer(InvokerActor.timerName)
+      setTimer(InvokerActor.timerName, Tick, 1.minute, repeat = true)
+    case `state` -> _ => cancelTimer(InvokerActor.timerName)
   }
+
+  onTransition(healthPingingTransitionHandler(Unhealthy))
+  onTransition(healthPingingTransitionHandler(Unresponsible))
 
   initialize()
 
@@ -284,31 +358,35 @@ class InvokerActor(invokerInstance: InstanceId, controllerInstance: InstanceId) 
    * Handling for active acks. This method saves the result (successful or unsuccessful)
    * into an RingBuffer and checks, if the InvokerActor has to be changed to UnHealthy.
    *
-   * @param wasActivationSuccessful: result of Activation
+   * @param result: result of Activation
    * @param buffer to be used
    */
-  private def handleCompletionMessage(wasActivationSuccessful: Boolean, buffer: RingBuffer[Boolean]) = {
-    buffer.add(wasActivationSuccessful)
+  private def handleCompletionMessage(result: InvocationFinishedResult,
+                                      buffer: RingBuffer[InvocationFinishedResult]) = {
+    buffer.add(result)
 
     // If the action is successful it seems like the Invoker is Healthy again. So we execute immediately
     // a new test action to remove the errors out of the RingBuffer as fast as possible.
     // The actions that arrive while the invoker is unhealthy are most likely health actions.
     // It is possible they are normal user actions as well. This can happen if such actions were in the
     // invoker queue or in progress while the invoker's status flipped to Unhealthy.
-    if (wasActivationSuccessful && stateName == UnHealthy) {
+    if (result == InvocationFinishedResult.Success && stateName == Unhealthy) {
       invokeTestAction()
     }
 
     // Stay in online if the activations was successful.
     // Stay in offline, if an activeAck reaches the controller.
-    if ((stateName == Healthy && wasActivationSuccessful) || stateName == Offline) {
+    if ((stateName == Healthy && result == InvocationFinishedResult.Success) || stateName == Offline) {
       stay
     } else {
-      // Goto UnHealthy if there are more errors than accepted in buffer, else goto Healthy
-      if (buffer.toList.count(_ == true) >= InvokerActor.bufferSize - InvokerActor.bufferErrorTolerance) {
-        gotoIfNotThere(Healthy)
+      val entries = buffer.toList
+      // Goto Unhealthy or Unresponsible respectively if there are more errors than accepted in buffer, else goto Healthy
+      if (entries.count(_ == InvocationFinishedResult.SystemError) > InvokerActor.bufferErrorTolerance) {
+        gotoIfNotThere(Unhealthy)
+      } else if (entries.count(_ == InvocationFinishedResult.Timeout) > InvokerActor.bufferErrorTolerance) {
+        gotoIfNotThere(Unresponsible)
       } else {
-        gotoIfNotThere(UnHealthy)
+        gotoIfNotThere(Healthy)
       }
     }
   }
@@ -347,7 +425,7 @@ class InvokerActor(invokerInstance: InstanceId, controllerInstance: InstanceId) 
 }
 
 object InvokerActor {
-  def props(invokerInstance: InstanceId, controllerInstance: InstanceId) =
+  def props(invokerInstance: InvokerInstanceId, controllerInstance: ControllerInstanceId) =
     Props(new InvokerActor(invokerInstance, controllerInstance))
 
   val bufferSize = 10

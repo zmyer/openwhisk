@@ -24,18 +24,19 @@ import org.scalatest.junit.JUnitRunner
 import common.TestHelpers
 import common.TestUtils
 import common.TestUtils.RunResult
-import common.BaseWsk
+import common.WskOperations
 import common.WskProps
 import common.WskTestHelpers
 import spray.json._
 import spray.json.DefaultJsonProtocol._
 import whisk.core.entity.Subject
 import whisk.core.entity.WhiskPackage
+import scala.concurrent.duration._
 
 @RunWith(classOf[JUnitRunner])
 abstract class WskEntitlementTests extends TestHelpers with WskTestHelpers with BeforeAndAfterAll {
 
-  val wsk: BaseWsk
+  val wsk: WskOperations
   lazy val defaultWskProps = WskProps()
   lazy val guestWskProps = getAdditionalTestSubject(Subject().asString)
   val forbiddenCode: Int
@@ -45,6 +46,8 @@ abstract class WskEntitlementTests extends TestHelpers with WskTestHelpers with 
   override def afterAll() = {
     disposeAdditionalTestSubject(guestWskProps.namespace)
   }
+
+  def retry[A](block: => A) = whisk.utils.retry(block, 10, Some(500.milliseconds))
 
   val samplePackage = "samplePackage"
   val sampleAction = "sampleAction"
@@ -151,13 +154,16 @@ abstract class WskEntitlementTests extends TestHelpers with WskTestHelpers with 
       pkg.create(samplePackage, shared = Some(true))(wp)
     }
 
-    val packageList = wsk.pkg.list(Some(s"/$guestNamespace"))(defaultWskProps)
-    verifyPackageSharedList(packageList, guestNamespace, samplePackage)
+    retry {
+      val packageList = wsk.pkg.list(Some(s"/$guestNamespace"))(defaultWskProps)
+      verifyPackageSharedList(packageList, guestNamespace, samplePackage)
+    }
   }
 
   def verifyPackageSharedList(packageList: RunResult, namespace: String, packageName: String): Unit = {
     val fullyQualifiedPackageName = s"/$namespace/$packageName"
-    packageList.stdout should include regex (fullyQualifiedPackageName + """\s+shared""")
+    withClue(s"Packagelist is: ${packageList.stdout}; Packagename is: $fullyQualifiedPackageName")(
+      packageList.stdout should include regex (fullyQualifiedPackageName + """\s+shared"""))
   }
 
   it should "not list private packages" in withAssetCleaner(guestWskProps) { (wp, assetHelper) =>
@@ -165,13 +171,16 @@ abstract class WskEntitlementTests extends TestHelpers with WskTestHelpers with 
       pkg.create(samplePackage)(wp)
     }
 
-    val packageList = wsk.pkg.list(Some(s"/$guestNamespace"))(defaultWskProps)
-    verifyPackageNotSharedList(packageList, guestNamespace, samplePackage)
+    retry {
+      val packageList = wsk.pkg.list(Some(s"/$guestNamespace"))(defaultWskProps)
+      verifyPackageNotSharedList(packageList, guestNamespace, samplePackage)
+    }
   }
 
   def verifyPackageNotSharedList(packageList: RunResult, namespace: String, packageName: String): Unit = {
     val fullyQualifiedPackageName = s"/$namespace/$packageName"
-    packageList.stdout should not include regex(fullyQualifiedPackageName)
+    withClue(s"Packagelist is: ${packageList.stdout}; Packagename is: $fullyQualifiedPackageName")(
+      packageList.stdout should not include (fullyQualifiedPackageName))
   }
 
   it should "list shared package actions" in withAssetCleaner(guestWskProps) { (wp, assetHelper) =>
@@ -186,13 +195,15 @@ abstract class WskEntitlementTests extends TestHelpers with WskTestHelpers with 
     }
 
     val fullyQualifiedPackageName = s"/$guestNamespace/$samplePackage"
-    val packageList = wsk.action.list(Some(fullyQualifiedPackageName))(defaultWskProps)
-    verifyPackageList(packageList, guestNamespace, samplePackage, sampleAction)
+    retry {
+      val packageList = wsk.action.list(Some(fullyQualifiedPackageName))(defaultWskProps)
+      verifyPackageList(packageList, guestNamespace, samplePackage, sampleAction)
+    }
   }
 
   def verifyPackageList(packageList: RunResult, namespace: String, packageName: String, actionName: String): Unit = {
     val result = packageList.stdout
-    result should include regex (s"/$namespace/$packageName/$actionName")
+    result should include(s"/$namespace/$packageName/$actionName")
   }
 
   behavior of "Wsk Package Binding"
@@ -212,11 +223,11 @@ abstract class WskEntitlementTests extends TestHelpers with WskTestHelpers with 
 
       val stdout = wsk.pkg.get(name)(defaultWskProps).stdout
       val annotationString = wsk.parseJsonString(stdout).fields("annotations").toString
-      annotationString should include regex (""""key":"a"""")
-      annotationString should include regex (""""value":"A"""")
-      annotationString should include regex (s""""key":"${WhiskPackage.bindingFieldName}"""")
-      annotationString should not include regex(""""key":"xxx"""")
-      annotationString should include regex (s""""name":"${samplePackage}"""")
+      annotationString should include(""""key":"a"""")
+      annotationString should include(""""value":"A"""")
+      annotationString should include(s""""key":"${WhiskPackage.bindingFieldName}"""")
+      annotationString should not include (""""key":"xxx"""")
+      annotationString should include(s""""name":"${samplePackage}"""")
     }
   }
 
@@ -263,8 +274,8 @@ abstract class WskEntitlementTests extends TestHelpers with WskTestHelpers with 
     stdout should include("name")
     stdout should include("parameters")
     stdout should include("limits")
-    stdout should include regex (""""key": "a"""")
-    stdout should include regex (""""value": "A"""")
+    stdout should include(""""key": "a"""")
+    stdout should include(""""value": "A"""")
   }
 
   it should "invoke an action sequence from package" in withAssetCleaner(guestWskProps) { (wp, assetHelper) =>
@@ -366,7 +377,8 @@ abstract class WskEntitlementTests extends TestHelpers with WskTestHelpers with 
         assetHelper.withCleaner(wsk.trigger, "badfeed", confirmDelete = false) { (trigger, name) =>
           trigger.create(name, feed = Some(fullyQualifiedFeedName), expectedExitCode = timeoutCode)(wp)
         }
-        wsk.trigger.get("badfeed", expectedExitCode = notFoundCode)(wp)
+        // with several active controllers race condition with cache invalidation might occur, thus retry
+        retry(wsk.trigger.get("badfeed", expectedExitCode = notFoundCode)(wp))
       }
   }
 

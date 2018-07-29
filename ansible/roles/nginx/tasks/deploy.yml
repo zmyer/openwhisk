@@ -1,3 +1,5 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more contributor
+# license agreements; and to You under the Apache License, Version 2.0.
 ---
 # This role starts a nginx component
 
@@ -27,6 +29,15 @@
     dest: "{{ nginx.confdir }}"
   when: nginx.ssl.password_enabled == true
 
+- name: copy controller cert for authentication
+  copy:
+    src: "{{ openwhisk_home }}/ansible/roles/controller/files/{{ item }}"
+    dest: "{{ nginx.confdir }}"
+  with_items:
+        - "{{ controller.ssl.cert }}"
+        - "{{ controller.ssl.key }}"
+  when: "{{ controller.protocol == 'https' }}"
+
 - name: ensure nginx log directory is created with permissions
   file:
     path: "{{ whisk_logs_dir }}/nginx"
@@ -36,6 +47,8 @@
 
 - name: "pull the nginx:{{ nginx.version }} image"
   shell: "docker pull nginx:{{ nginx.version }}"
+  register: result
+  until: (result.rc == 0)
   retries: "{{ docker.pull.retries }}"
   delay: "{{ docker.pull.delay }}"
 

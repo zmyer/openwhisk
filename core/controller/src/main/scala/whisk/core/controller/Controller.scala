@@ -29,28 +29,26 @@ import akka.http.scaladsl.model.Uri
 import akka.http.scaladsl.server.Route
 import akka.stream.ActorMaterializer
 import spray.json._
-
 import spray.json.DefaultJsonProtocol._
-
 import kamon.Kamon
-
 import whisk.common.AkkaLogging
 import whisk.common.Logging
 import whisk.common.LoggingMarkers
 import whisk.common.TransactionId
 import whisk.core.WhiskConfig
 import whisk.core.connector.MessagingProvider
-import whisk.core.database.RemoteCacheInvalidation
-import whisk.core.database.CacheChangeNotification
+import whisk.core.database.{ActivationStoreProvider, CacheChangeNotification, RemoteCacheInvalidation}
 import whisk.core.entitlement._
 import whisk.core.entity._
 import whisk.core.entity.ActivationId.ActivationIdGenerator
 import whisk.core.entity.ExecManifest.Runtimes
-import whisk.core.loadBalancer.{LoadBalancerService}
+import whisk.core.loadBalancer.{InvokerState, LoadBalancerProvider}
 import whisk.http.BasicHttpService
 import whisk.http.BasicRasService
 import whisk.spi.SpiLoader
 import whisk.core.containerpool.logging.LogStoreProvider
+import akka.event.Logging.InfoLevel
+import pureconfig.loadConfigOrThrow
 
 /**
  * The Controller is the service that provides the REST API for OpenWhisk.
@@ -75,7 +73,7 @@ import whisk.core.containerpool.logging.LogStoreProvider
  * @param verbosity logging verbosity
  * @param executionContext Scala runtime support for concurrent operations
  */
-class Controller(val instance: InstanceId,
+class Controller(val instance: ControllerInstanceId,
                  runtimes: Runtimes,
                  implicit val whiskConfig: WhiskConfig,
                  implicit val actorSystem: ActorSystem,
@@ -83,13 +81,11 @@ class Controller(val instance: InstanceId,
                  implicit val logging: Logging)
     extends BasicRasService {
 
-  override val numberOfInstances = whiskConfig.controllerInstances.toInt
-  override val instanceOrdinal = instance.toInt
-
   TransactionId.controller.mark(
     this,
-    LoggingMarkers.CONTROLLER_STARTUP(instance.toInt),
-    s"starting controller instance ${instance.toInt}")
+    LoggingMarkers.CONTROLLER_STARTUP(instance.asString),
+    s"starting controller instance ${instance.asString}",
+    logLevel = InfoLevel)
 
   /**
    * A Route in Akka is technically a function taking a RequestContext as a parameter.
@@ -106,9 +102,8 @@ class Controller(val instance: InstanceId,
   }
 
   // initialize datastores
-  private implicit val authStore = WhiskAuthStore.datastore(whiskConfig)
-  private implicit val entityStore = WhiskEntityStore.datastore(whiskConfig)
-  private implicit val activationStore = WhiskActivationStore.datastore(whiskConfig)
+  private implicit val authStore = WhiskAuthStore.datastore()
+  private implicit val entityStore = WhiskEntityStore.datastore()
   private implicit val cacheChangeNotification = Some(new CacheChangeNotification {
     val remoteCacheInvalidaton = new RemoteCacheInvalidation(whiskConfig, "controller", instance)
     override def apply(k: CacheKey) = {
@@ -118,10 +113,16 @@ class Controller(val instance: InstanceId,
   })
 
   // initialize backend services
-  private implicit val loadBalancer = new LoadBalancerService(whiskConfig, instance, entityStore)
-  private implicit val entitlementProvider = new LocalEntitlementProvider(whiskConfig, loadBalancer)
+  private implicit val loadBalancer =
+    SpiLoader.get[LoadBalancerProvider].instance(whiskConfig, instance)
+  logging.info(this, s"loadbalancer initialized: ${loadBalancer.getClass.getSimpleName}")(TransactionId.controller)
+
+  private implicit val entitlementProvider =
+    SpiLoader.get[EntitlementSpiProvider].instance(whiskConfig, loadBalancer, instance)
   private implicit val activationIdFactory = new ActivationIdGenerator {}
-  private implicit val logStore = SpiLoader.get[LogStoreProvider].logStore(actorSystem)
+  private implicit val logStore = SpiLoader.get[LogStoreProvider].instance(actorSystem)
+  private implicit val activationStore =
+    SpiLoader.get[ActivationStoreProvider].instance(actorSystem, materializer, logging)
 
   // register collections
   Collection.initialize(entityStore)
@@ -132,30 +133,46 @@ class Controller(val instance: InstanceId,
   private val swagger = new SwaggerDocs(Uri.Path.Empty, "infoswagger.json")
 
   /**
-   * Handles GET /invokers URI.
+   * Handles GET /invokers
+   *             /invokers/healthy/count
    *
-   * @return JSON of invoker health
+   * @return JSON with details of invoker health or count of healthy invokers respectively.
    */
   private val internalInvokerHealth = {
     implicit val executionContext = actorSystem.dispatcher
-
-    (path("invokers") & get) {
-      complete {
-        loadBalancer.allInvokers.map(_.map {
-          case (instance, state) => s"invoker${instance.toInt}" -> state.asString
-        }.toMap.toJson.asJsObject)
+    (pathPrefix("invokers") & get) {
+      pathEndOrSingleSlash {
+        complete {
+          loadBalancer
+            .invokerHealth()
+            .map(_.map(i => i.id.toString -> i.status.asString).toMap.toJson.asJsObject)
+        }
+      } ~ path("healthy" / "count") {
+        complete {
+          loadBalancer
+            .invokerHealth()
+            .map(_.count(_.status == InvokerState.Healthy).toJson)
+        }
       }
     }
   }
 
   // controller top level info
-  private val info = Controller.info(whiskConfig, runtimes, List(apiV1.basepath()))
+  private val info = Controller.info(
+    whiskConfig,
+    TimeLimit.config,
+    MemoryLimit.config,
+    LogLimit.config,
+    runtimes,
+    List(apiV1.basepath()))
 }
 
 /**
  * Singleton object provides a factory to create and start an instance of the Controller service.
  */
 object Controller {
+
+  protected val protocol = loadConfigOrThrow[String]("whisk.controller.protocol")
 
   // requiredProperties is a Map whose keys define properties that must be bound to
   // a value, and whose values are default values.   A null value in the Map means there is
@@ -164,10 +181,15 @@ object Controller {
     Map(WhiskConfig.controllerInstances -> null) ++
       ExecManifest.requiredProperties ++
       RestApiCommons.requiredProperties ++
-      LoadBalancerService.requiredProperties ++
+      SpiLoader.get[LoadBalancerProvider].requiredProperties ++
       EntitlementProvider.requiredProperties
 
-  private def info(config: WhiskConfig, runtimes: Runtimes, apis: List[String]) =
+  private def info(config: WhiskConfig,
+                   timeLimit: TimeLimitConfig,
+                   memLimit: MemoryLimitConfig,
+                   logLimit: MemoryLimitConfig,
+                   runtimes: Runtimes,
+                   apis: List[String]) =
     JsObject(
       "description" -> "OpenWhisk".toJson,
       "support" -> JsObject(
@@ -177,7 +199,14 @@ object Controller {
       "limits" -> JsObject(
         "actions_per_minute" -> config.actionInvokePerMinuteLimit.toInt.toJson,
         "triggers_per_minute" -> config.triggerFirePerMinuteLimit.toInt.toJson,
-        "concurrent_actions" -> config.actionInvokeConcurrentLimit.toInt.toJson),
+        "concurrent_actions" -> config.actionInvokeConcurrentLimit.toInt.toJson,
+        "sequence_length" -> config.actionSequenceLimit.toInt.toJson,
+        "min_action_duration" -> timeLimit.min.toMillis.toJson,
+        "max_action_duration" -> timeLimit.max.toMillis.toJson,
+        "min_action_memory" -> memLimit.min.toBytes.toJson,
+        "max_action_memory" -> memLimit.max.toBytes.toJson,
+        "min_action_logs" -> logLimit.min.toBytes.toJson,
+        "max_action_logs" -> logLimit.max.toBytes.toJson),
       "runtimes" -> runtimes.toJson)
 
   def main(args: Array[String]): Unit = {
@@ -198,7 +227,7 @@ object Controller {
 
     // if deploying multiple instances (scale out), must pass the instance number as the
     require(args.length >= 1, "controller instance required")
-    val instance = args(0).toInt
+    val instance = ControllerInstanceId(args(0))
 
     def abort(message: String) = {
       logger.error(this, message)
@@ -212,26 +241,31 @@ object Controller {
     }
 
     val msgProvider = SpiLoader.get[MessagingProvider]
-    if (!msgProvider.ensureTopic(config, topic = "completed" + instance, topicConfig = "completed")) {
-      abort(s"failure during msgProvider.ensureTopic for topic completed$instance")
-    }
-    if (!msgProvider.ensureTopic(config, topic = "health", topicConfig = "health")) {
-      abort(s"failure during msgProvider.ensureTopic for topic health")
-    }
-    if (!msgProvider.ensureTopic(config, topic = "cacheInvalidation", topicConfig = "cache-invalidation")) {
-      abort(s"failure during msgProvider.ensureTopic for topic cacheInvalidation")
+
+    Map(
+      "completed" + instance.asString -> "completed",
+      "health" -> "health",
+      "cacheInvalidation" -> "cache-invalidation",
+      "events" -> "events").foreach {
+      case (topic, topicConfigurationKey) =>
+        if (msgProvider.ensureTopic(config, topic, topicConfigurationKey).isFailure) {
+          abort(s"failure during msgProvider.ensureTopic for topic $topic")
+        }
     }
 
     ExecManifest.initialize(config) match {
       case Success(_) =>
         val controller = new Controller(
-          InstanceId(instance),
+          instance,
           ExecManifest.runtimesManifest,
           config,
           actorSystem,
           ActorMaterializer.create(actorSystem),
           logger)
-        BasicHttpService.startService(controller.route, port)(actorSystem, controller.materializer)
+        if (Controller.protocol == "https")
+          BasicHttpService.startHttpsService(controller.route, port, config)(actorSystem, controller.materializer)
+        else
+          BasicHttpService.startHttpService(controller.route, port)(actorSystem, controller.materializer)
 
       case Failure(t) =>
         abort(s"Invalid runtimes manifest: $t")

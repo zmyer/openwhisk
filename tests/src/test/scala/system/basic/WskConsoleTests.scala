@@ -29,12 +29,11 @@ import org.scalatest.junit.JUnitRunner
 
 import common.TestHelpers
 import common.TestUtils
-import common.BaseWsk
+import common.WskOperations
 import common.WskProps
 import common.WskTestHelpers
-import spray.json.DefaultJsonProtocol.IntJsonFormat
-import spray.json.DefaultJsonProtocol.StringJsonFormat
-import spray.json.pimpAny
+import spray.json.DefaultJsonProtocol._
+import spray.json._
 
 /**
  * Tests of the text console
@@ -43,13 +42,8 @@ import spray.json.pimpAny
 abstract class WskConsoleTests extends TestHelpers with WskTestHelpers {
 
   implicit val wskprops = WskProps()
-  val wsk: BaseWsk
+  val wsk: WskOperations
   val guestNamespace = wskprops.namespace
-
-  /**
-   * Append the current timestamp in ms
-   */
-  def withTimestamp(text: String) = s"${text}-${System.currentTimeMillis}"
 
   behavior of "Wsk Activation Console"
 

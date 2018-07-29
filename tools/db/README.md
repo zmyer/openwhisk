@@ -1,3 +1,22 @@
+<!--
+#
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+-->
+
 # Configure data store
 
 Before you can build and deploy OpenWhisk, you must configure a backing data store. The system supports any self-managed [CouchDB](#using-couchdb) instance or [Cloudant](#using-cloudant) as a cloud-based database service.
@@ -8,7 +27,6 @@ If you are using your own installation of CouchDB, make a note of the host, port
 
    * the username must have administrative rights
    * the CouchDB instance must be accessible over `http` or `https` (the latter requires a valid certificate)
-   * the CouchDB instance must set `reduce_limit` on views to `false` (see [this](../../ansible/README.md#persistent-couchdb) for how to do this via REST)
 
 ### Using an ephemeral CouchDB container
 
@@ -22,12 +40,10 @@ Detailed instructions are found in the [ansible readme](../../ansible/README.md)
 
 ## Using Cloudant
 
-As an alternative to a self-managed CouchDB, you may want to try [Cloudant](https://cloudant.com) which is a cloud-based database service. 
-There are two ways to get a Cloudant account and configure OpenWhisk to use it. 
-You only need to establish an account once, either through IBM Bluemix or with Cloudant directly. 
+As an alternative to a self-managed CouchDB, you may want to try [Cloudant](https://cloudant.com) which is a cloud-based database service.
 
-### Create a Cloudant account via IBM Bluemix
-Sign up for an account via [IBM Bluemix](https://bluemix.net). Bluemix offers trial accounts and its signup process is straightforward so it is not described here in detail. Using Bluemix, the most convenient way to create a Cloudant instance is via the `cf` command-line tool. See [here](https://www.ng.bluemix.net/docs/starters/install_cli.html) for instructions on how to download and configure `cf` to work with your Bluemix account.
+### Create a Cloudant account via IBM Cloud
+Sign up for an account via [IBM Cloud](https://bluemix.net). IBM Cloud offers trial accounts and its signup process is straightforward so it is not described here in detail. Using IBM Cloud, the most convenient way to create a Cloudant instance is via the `cf` command-line tool. See [here](https://www.ng.bluemix.net/docs/starters/install_cli.html) for instructions on how to download and configure `cf` to work with your IBM Cloud account.
 
 When `cf` is set up, issue the following commands to create a Cloudant database.
 
@@ -43,11 +59,6 @@ When `cf` is set up, issue the following commands to create a Cloudant database.
   ```
 
 Make note of the Cloudant `username` and `password` from the last `cf` command so you can create the required `db_local.ini`.
-
-### Create a Cloudant account directly with Cloudant
-
-As an alternative to IBM Bluemix, you may sign up for an account with [Cloudant](https://cloudant.com) directly. Cloudant is free to try and offers a metered pricing where the first $50 of usage is free each month. The signup process is straightforward so it is not described here in detail.
-Once you have created a Cloudant account, make note of the account `username` and `password` from the Cloudant dashboard, so you can create the required `db_local.ini`.
 
 ### Setting the Cloudant credentials
 
@@ -72,7 +83,7 @@ If you are [using an ephemeral CouchDB container](#using-an-ephemeral-couchdb-co
   ```
   # Work out of your openwhisk directory
   cd /your/path/to/openwhisk/ansible
-  
+
   # Initialize data store containing authorization keys
   ansible-playbook initdb.yml
   ```
@@ -138,3 +149,12 @@ Using that command will result in a replication for every database that matches 
 ### Replaying a snapshot
 
 To replay a snapshot, swap `--sourceDbUrl` and `--targetDbUrl` and call the script with the `replay` command. That command takes only 1 parameter: `--dbPrefix` to determine which backup to play back. Matching databases will be replicated back to the target database with the `backup_${TIMESTAMP_IN_SECONDS}_` removed, so they'd look just like the original database.
+
+## Database migration to new schema
+
+To reduce the memory consumption in the OpenWhisk controller, all code inlined in action documents has been moved to attachments. This change allows only metadata for actions to be fetched instead of the entire action. Though the OpenWhisk controller supports both mentioned schemas, it is ideal to update existing databases to use the new schema for memory consumption relief.
+
+Run `moveCodeToAttachment.py` to update actions in an existing database to the new action schema. Two parameters are required:
+
+* `--dbUrl`: Server URL of the database. E.g. 'https://xxx:yyy@domain.couch.com:443'.
+* `--dbName`: Name of the Database to update.

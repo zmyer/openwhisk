@@ -17,38 +17,25 @@
 
 package whisk.core.invoker
 
-import scala.concurrent.Await
-import scala.concurrent.duration._
-import scala.concurrent.Future
-import scala.util.Failure
-import scala.util.Try
-
-import kamon.Kamon
-
-import org.apache.curator.retry.RetryUntilElapsed
-import org.apache.curator.framework.CuratorFrameworkFactory
-import org.apache.curator.framework.recipes.shared.SharedCount
-
 import akka.Done
-import akka.actor.ActorSystem
-import akka.actor.CoordinatedShutdown
+import akka.actor.{ActorSystem, CoordinatedShutdown}
 import akka.stream.ActorMaterializer
-import whisk.common.AkkaLogging
-import whisk.common.Scheduler
+import com.typesafe.config.ConfigValueFactory
+import kamon.Kamon
+import whisk.common._
 import whisk.core.WhiskConfig
 import whisk.core.WhiskConfig._
-import whisk.core.connector.MessagingProvider
-import whisk.core.connector.PingMessage
-import whisk.core.entity.ExecManifest
-import whisk.core.entity.InstanceId
-import whisk.core.entity.WhiskActivationStore
-import whisk.core.entity.WhiskEntityStore
-import whisk.http.BasicHttpService
+import whisk.core.connector.{MessagingProvider, PingMessage}
+import whisk.core.entity.{ExecManifest, InvokerInstanceId}
+import whisk.http.{BasicHttpService, BasicRasService}
 import whisk.spi.SpiLoader
 import whisk.utils.ExecutionContextFactory
-import whisk.common.TransactionId
 
-case class CmdLineArgs(name: Option[String] = None, id: Option[Int] = None)
+import scala.concurrent.duration._
+import scala.concurrent.{Await, Future}
+import scala.util.{Failure, Try}
+
+case class CmdLineArgs(uniqueName: Option[String] = None, id: Option[Int] = None, displayedName: Option[String] = None)
 
 object Invoker {
 
@@ -56,25 +43,22 @@ object Invoker {
    * An object which records the environment variables required for this component to run.
    */
   def requiredProperties =
-    Map(servicePort -> 8080.toString(), dockerRegistry -> null, dockerImagePrefix -> null) ++
+    Map(servicePort -> 8080.toString, invokerName -> "", runtimesRegistry -> "") ++
       ExecManifest.requiredProperties ++
-      WhiskEntityStore.requiredProperties ++
-      WhiskActivationStore.requiredProperties ++
       kafkaHosts ++
       zookeeperHosts ++
-      wskApiHost ++ Map(
-      dockerImageTag -> "latest",
-      invokerNumCore -> "4",
-      invokerCoreShare -> "2",
-      invokerContainerPolicy -> "",
-      invokerContainerDns -> "",
-      invokerContainerNetwork -> null,
-      invokerUseRunc -> "true") ++
-      Map(invokerName -> "")
+      wskApiHost
+
+  def initKamon(instance: Int): Unit = {
+    // Replace the hostname of the invoker to the assigned id of the invoker.
+    val newKamonConfig = Kamon.config
+      .withValue(
+        "kamon.statsd.simple-metric-key-generator.hostname-override",
+        ConfigValueFactory.fromAnyRef(s"invoker$instance"))
+    Kamon.start(newKamonConfig)
+  }
 
   def main(args: Array[String]): Unit = {
-    Kamon.start()
-
     implicit val ec = ExecutionContextFactory.makeCachedThreadPoolExecutionContext()
     implicit val actorSystem: ActorSystem =
       ActorSystem(name = "invoker-actor-system", defaultExecutionContext = Some(ec))
@@ -101,7 +85,7 @@ object Invoker {
       abort("Bad configuration, cannot start.")
     }
 
-    val execManifest = ExecManifest.initialize(config, localDockerImagePrefix = Some(config.dockerImagePrefix))
+    val execManifest = ExecManifest.initialize(config)
     if (execManifest.isFailure) {
       logger.error(this, s"Invalid runtimes manifest: ${execManifest.failed.get}")
       abort("Bad configuration, cannot start.")
@@ -110,11 +94,14 @@ object Invoker {
     // process command line arguments
     // We accept the command line grammar of:
     // Usage: invoker [options] [<proposedInvokerId>]
-    //    --name <value>   a unique name to use for this invoker
+    //    --uniqueName <value>   a unique name to dynamically assign Kafka topics from Zookeeper
+    //    --displayedName <value> a name to identify this invoker via invoker health protocol
     //    --id <value>     proposed invokerId
+
     def parse(ls: List[String], c: CmdLineArgs): CmdLineArgs = {
       ls match {
-        case "--name" :: name :: tail                        => parse(tail, c.copy(name = Some(name)))
+        case "--uniqueName" :: uniqueName :: tail            => parse(tail, c.copy(uniqueName = Some(uniqueName)))
+        case "--displayedName" :: displayedName :: tail      => parse(tail, c.copy(displayedName = Some(displayedName)))
         case "--id" :: id :: tail if Try(id.toInt).isSuccess => parse(tail, c.copy(id = Some(id.toInt)))
         case id :: Nil if Try(id.toInt).isSuccess            => c.copy(id = Some(id.toInt))
         case Nil                                             => c
@@ -123,7 +110,8 @@ object Invoker {
     }
     val cmdLineArgs = parse(args.toList, CmdLineArgs())
     logger.info(this, "Command line arguments parsed to yield " + cmdLineArgs)
-
+    val invokerUniqueName =
+      cmdLineArgs.uniqueName.orElse(if (config.invokerName.trim.isEmpty) None else Some(config.invokerName))
     val assignedInvokerId = cmdLineArgs.id
       .map { id =>
         logger.info(this, s"invokerReg: using proposedInvokerId ${id}")
@@ -133,59 +121,24 @@ object Invoker {
         if (config.zookeeperHosts.startsWith(":") || config.zookeeperHosts.endsWith(":")) {
           abort(s"Must provide valid zookeeper host and port to use dynamicId assignment (${config.zookeeperHosts})")
         }
-        val invokerName = cmdLineArgs.name.getOrElse(config.invokerName)
-        if (invokerName.trim.isEmpty) {
+        if (invokerUniqueName.isEmpty || invokerUniqueName.get.trim.isEmpty) {
           abort("Invoker name can't be empty to use dynamicId assignment.")
         }
 
-        logger.info(this, s"invokerReg: creating zkClient to ${config.zookeeperHosts}")
-        val retryPolicy = new RetryUntilElapsed(5000, 500) // retry at 500ms intervals until 5 seconds have elapsed
-        val zkClient = CuratorFrameworkFactory.newClient(config.zookeeperHosts, retryPolicy)
-        zkClient.start()
-        zkClient.blockUntilConnected()
-        logger.info(this, "invokerReg: connected to zookeeper")
-
-        val myIdPath = "/invokers/idAssignment/mapping/" + invokerName
-        val assignedId = Option(zkClient.checkExists().forPath(myIdPath)) match {
-          case None =>
-            // path doesn't exist -> no previous mapping for this invoker
-            logger.info(this, s"invokerReg: no prior assignment of id for invoker $invokerName")
-            val idCounter = new SharedCount(zkClient, "/invokers/idAssignment/counter", 0)
-            idCounter.start()
-
-            def assignId(): Int = {
-              val current = idCounter.getVersionedValue()
-              if (idCounter.trySetCount(current, current.getValue() + 1)) {
-                current.getValue()
-              } else {
-                assignId()
-              }
-            }
-
-            val newId = assignId()
-            idCounter.close()
-            zkClient.create().creatingParentContainersIfNeeded().forPath(myIdPath, BigInt(newId).toByteArray)
-            logger.info(this, s"invokerReg: invoker ${invokerName} was assigned invokerId ${newId}")
-            newId
-
-          case Some(_) =>
-            // path already exists -> there is a previous mapping for this invoker we should use
-            val rawOldId = zkClient.getData().forPath(myIdPath)
-            val oldId = BigInt(rawOldId).intValue
-            logger.info(this, s"invokerReg: invoker ${invokerName} was assigned its previous invokerId ${oldId}")
-            oldId
-        }
-
-        zkClient.close()
-        assignedId
+        new InstanceIdAssigner(config.zookeeperHosts).getId(invokerUniqueName.get)
       }
 
-    val invokerInstance = InstanceId(assignedInvokerId)
+    initKamon(assignedInvokerId)
+
+    val topicBaseName = "invoker"
+    val topicName = topicBaseName + assignedInvokerId
+    val invokerDisplayedName = cmdLineArgs.displayedName
+    val invokerInstance = InvokerInstanceId(assignedInvokerId, invokerUniqueName, invokerDisplayedName)
     val msgProvider = SpiLoader.get[MessagingProvider]
-    if (!msgProvider.ensureTopic(config, topic = "invoker" + assignedInvokerId, topicConfig = "invoker")) {
-      abort(s"failure during msgProvider.ensureTopic for topic invoker$assignedInvokerId")
+    if (msgProvider.ensureTopic(config, topic = topicName, topicConfig = topicBaseName).isFailure) {
+      abort(s"failure during msgProvider.ensureTopic for topic $topicName")
     }
-    val producer = msgProvider.getProducer(config, ec)
+    val producer = msgProvider.getProducer(config)
     val invoker = try {
       new InvokerReactive(config, invokerInstance, producer)
     } catch {
@@ -199,6 +152,8 @@ object Invoker {
     })
 
     val port = config.servicePort.toInt
-    BasicHttpService.startService(new InvokerServer().route, port)(actorSystem, ActorMaterializer.create(actorSystem))
+    BasicHttpService.startHttpService(new BasicRasService {}.route, port)(
+      actorSystem,
+      ActorMaterializer.create(actorSystem))
   }
 }

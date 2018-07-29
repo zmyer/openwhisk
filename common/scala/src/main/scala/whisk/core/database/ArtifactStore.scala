@@ -26,6 +26,7 @@ import akka.util.ByteString
 import spray.json.JsObject
 import whisk.common.Logging
 import whisk.common.TransactionId
+import whisk.core.entity.Attachments.Attached
 import whisk.core.entity.DocInfo
 
 abstract class StaleParameter(val value: Option[String])
@@ -69,16 +70,18 @@ trait ArtifactStore[DocumentAbstraction] {
    * If the operation is successful, the future completes with the requested document if it exists.
    *
    * @param doc the document info for the record to get (must contain valid id and rev)
+   * @param attachmentHandler function to update the attachment details in document
    * @param transid the transaction id for logging
    * @param ma manifest for A to determine its runtime type, required by some db APIs
    * @return a future that completes either with DocumentAbstraction if the document exists and is deserializable into desired type
    */
-  protected[database] def get[A <: DocumentAbstraction](doc: DocInfo)(implicit transid: TransactionId,
-                                                                      ma: Manifest[A]): Future[A]
+  protected[database] def get[A <: DocumentAbstraction](
+    doc: DocInfo,
+    attachmentHandler: Option[(A, Attached) => A] = None)(implicit transid: TransactionId, ma: Manifest[A]): Future[A]
 
   /**
    * Gets all documents from database view that match a start key, up to an end key, using a future.
-   * If the operation is successful, the promise completes with List[View]] with zero or more documents.
+   * If the operation is successful, the promise completes with List[View] with zero or more documents.
    *
    * @param table the name of the table to query
    * @param startKey to starting key to query the view for
@@ -88,6 +91,7 @@ trait ArtifactStore[DocumentAbstraction] {
    * @param includeDocs include full documents matching query iff true (shall not be used with reduce)
    * @param descending reverse results iff true
    * @param reduce apply reduction associated with query to the result iff true
+   * @param stale a flag to permit a stale view result to be returned
    * @param transid the transaction id for logging
    * @return a future that completes with List[JsObject] of all documents from view between start and end key (list may be empty)
    */
@@ -102,16 +106,44 @@ trait ArtifactStore[DocumentAbstraction] {
                             stale: StaleParameter)(implicit transid: TransactionId): Future[List[JsObject]]
 
   /**
-   * Attaches a "file" of type `contentType` to an existing document. The revision for the document must be set.
+   * Counts all documents from database view that match a start key, up to an end key, using a future.
+   * If the operation is successful, the promise completes with Long.
+   *
+   * @param table the name of the table to query
+   * @param startKey to starting key to query the view for
+   * @param endKey to starting key to query the view for
+   * @param skip the number of record to skip (for pagination)
+   * @param stale a flag to permit a stale view result to be returned
+   * @param transid the transaction id for logging
+   * @return a future that completes with Long that is the number of documents from view between start and end key (count may be zero)
    */
-  protected[core] def attach(doc: DocInfo, name: String, contentType: ContentType, docStream: Source[ByteString, _])(
-    implicit transid: TransactionId): Future[DocInfo]
+  protected[core] def count(table: String, startKey: List[Any], endKey: List[Any], skip: Int, stale: StaleParameter)(
+    implicit transid: TransactionId): Future[Long]
+
+  /**
+   * Attaches a "file" of type `contentType` to an existing document. The revision for the document must be set.
+   *
+   * @param update - function to transform the document with new attachment details
+   * @param oldAttachment Optional old document instance for the update scenario. It would be used to determine
+   *                      the existing attachment details.
+   */
+  protected[database] def putAndAttach[A <: DocumentAbstraction](
+    d: A,
+    update: (A, Attached) => A,
+    contentType: ContentType,
+    docStream: Source[ByteString, _],
+    oldAttachment: Option[Attached])(implicit transid: TransactionId): Future[(DocInfo, Attached)]
 
   /**
    * Retrieves a saved attachment, streaming it into the provided Sink.
    */
-  protected[core] def readAttachment[T](doc: DocInfo, name: String, sink: Sink[ByteString, Future[T]])(
-    implicit transid: TransactionId): Future[(ContentType, T)]
+  protected[core] def readAttachment[T](doc: DocInfo, attached: Attached, sink: Sink[ByteString, Future[T]])(
+    implicit transid: TransactionId): Future[T]
+
+  /**
+   * Deletes all attachments linked to given document
+   */
+  protected[core] def deleteAttachments[T](doc: DocInfo)(implicit transid: TransactionId): Future[Boolean]
 
   /** Shut it down. After this invocation, every other call is invalid. */
   def shutdown(): Unit

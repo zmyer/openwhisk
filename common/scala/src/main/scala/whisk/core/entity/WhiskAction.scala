@@ -24,7 +24,6 @@ import java.util.Base64
 import scala.concurrent.ExecutionContext
 import scala.concurrent.Future
 import scala.util.{Failure, Success, Try}
-
 import spray.json._
 import spray.json.DefaultJsonProtocol._
 import whisk.common.TransactionId
@@ -60,7 +59,7 @@ case class WhiskActionPut(exec: Option[Exec] = None,
   /**
    * Resolves sequence components if they contain default namespace.
    */
-  protected[core] def resolve(userNamespace: EntityName): WhiskActionPut = {
+  protected[core] def resolve(userNamespace: Namespace): WhiskActionPut = {
     exec map {
       case SequenceExec(components) =>
         val newExec = SequenceExec(components map { c =>
@@ -72,14 +71,14 @@ case class WhiskActionPut(exec: Option[Exec] = None,
   }
 }
 
-abstract class WhiskActionLike(override val name: EntityName) extends WhiskEntity(name) {
+abstract class WhiskActionLike(override val name: EntityName) extends WhiskEntity(name, "action") {
   def exec: Exec
   def parameters: Parameters
   def limits: ActionLimits
 
   /** @return true iff action has appropriate annotation. */
   def hasFinalParamsAnnotation = {
-    annotations.asBool(WhiskAction.finalParamsAnnotationName) getOrElse false
+    annotations.getAs[Boolean](WhiskAction.finalParamsAnnotationName) getOrElse false
   }
 
   /** @return a Set of immutable parameternames */
@@ -144,6 +143,13 @@ case class WhiskAction(namespace: EntityPath,
   /**
    * Resolves sequence components if they contain default namespace.
    */
+  protected[core] def resolve(userNamespace: Namespace): WhiskAction = {
+    resolve(userNamespace.name)
+  }
+
+  /**
+   * Resolves sequence components if they contain default namespace.
+   */
   protected[core] def resolve(userNamespace: EntityName): WhiskAction = {
     exec match {
       case SequenceExec(components) =>
@@ -160,8 +166,23 @@ case class WhiskAction(namespace: EntityPath,
       Some(
         ExecutableWhiskAction(namespace, name, codeExec, parameters, limits, version, publish, annotations)
           .revision[ExecutableWhiskAction](rev))
-    case _ =>
-      None
+    case _ => None
+  }
+
+  /**
+   * This the action summary as computed by the database view.
+   * Strictly used in view testing to enforce alignment.
+   */
+  override def summaryAsJson = {
+    val binary = exec match {
+      case c: CodeExec[_] => c.binary
+      case _              => false
+    }
+
+    JsObject(
+      super.summaryAsJson.fields +
+        ("limits" -> limits.toJson) +
+        ("exec" -> JsObject("binary" -> JsBoolean(binary))))
   }
 }
 
@@ -188,11 +209,11 @@ case class WhiskActionMetaData(namespace: EntityPath,
   /**
    * Resolves sequence components if they contain default namespace.
    */
-  protected[core] def resolve(userNamespace: EntityName): WhiskActionMetaData = {
+  protected[core] def resolve(userNamespace: Namespace): WhiskActionMetaData = {
     exec match {
       case SequenceExecMetaData(components) =>
         val newExec = SequenceExecMetaData(components map { c =>
-          FullyQualifiedEntityName(c.path.resolveNamespace(userNamespace), c.name)
+          FullyQualifiedEntityName(c.path.resolveNamespace(userNamespace.name), c.name)
         })
         copy(exec = newExec).revision[WhiskActionMetaData](rev)
       case _ => this
@@ -215,6 +236,11 @@ case class WhiskActionMetaData(namespace: EntityPath,
  * executed by an Invoker.
  *
  * exec is typed to CodeExec to guarantee executability by an Invoker.
+ *
+ * Note: Two actions are equal regardless of their DocRevision if there is one.
+ * The invoker uses action equality when matching actions to warm containers.
+ * That means creating an action, invoking it, then deleting/recreating/reinvoking
+ * it will reuse the previous container. The delete/recreate restores the SemVer to 0.0.1.
  *
  * @param namespace the namespace for the action
  * @param name the name of the action
@@ -294,8 +320,11 @@ object WhiskAction extends DocumentFactory[WhiskAction] with WhiskEntityQueries[
 
   override val cacheEnabled = true
 
+  val requireWhiskAuthAnnotation = "require-whisk-auth"
+  val requireWhiskAuthHeader = "x-require-whisk-auth"
+
   // overriden to store attached code
-  override def put[A >: WhiskAction](db: ArtifactStore[A], doc: WhiskAction)(
+  override def put[A >: WhiskAction](db: ArtifactStore[A], doc: WhiskAction, old: Option[WhiskAction])(
     implicit transid: TransactionId,
     notifier: Option[CacheChangeNotification]): Future[DocInfo] = {
 
@@ -308,18 +337,27 @@ object WhiskAction extends DocumentFactory[WhiskAction] with WhiskEntityQueries[
           implicit val logger = db.logging
           implicit val ec = db.executionContext
 
-          val newDoc = doc.copy(exec = exec.attach)
-          newDoc.revision(doc.rev)
-
           val stream = new ByteArrayInputStream(Base64.getDecoder().decode(code))
           val manifest = exec.manifest.attached.get
+          val oldAttachment = old
+            .flatMap(_.exec match {
+              case CodeExecAsAttachment(_, a: Attached, _) => Some(a)
+              case _                                       => None
+            })
 
-          for (i1 <- super.put(db, newDoc);
-               i2 <- attach[A](db, newDoc.revision(i1.rev), manifest.attachmentName, manifest.attachmentType, stream))
-            yield i2
+          super.putAndAttach(
+            db,
+            doc,
+            (d, a) => d.copy(exec = exec.attach(a)).revision[WhiskAction](d.rev),
+            manifest.attachmentType,
+            stream,
+            oldAttachment,
+            Some { a: WhiskAction =>
+              a.copy(exec = exec.inline(code.getBytes("UTF-8")))
+            })
 
         case _ =>
-          super.put(db, doc)
+          super.put(db, doc, old)
       }
     } match {
       case Success(f) => f
@@ -336,24 +374,54 @@ object WhiskAction extends DocumentFactory[WhiskAction] with WhiskEntityQueries[
 
     implicit val ec = db.executionContext
 
-    val fa = super.get(db, doc, rev, fromCache)
+    val fa = super.getWithAttachment(db, doc, rev, fromCache, Some(attachmentHandler _))
 
     fa.flatMap { action =>
       action.exec match {
-        case exec @ CodeExecAsAttachment(_, Attached(attachmentName, _), _) =>
+        case exec @ CodeExecAsAttachment(_, attached: Attached, _) =>
           val boas = new ByteArrayOutputStream()
           val b64s = Base64.getEncoder().wrap(boas)
 
-          getAttachment[A](db, action.docinfo, attachmentName, b64s).map { _ =>
+          getAttachment[A](db, action, attached, b64s, Some { a: WhiskAction =>
             b64s.close()
-            val newAction = action.copy(exec = exec.inline(boas.toByteArray))
-            newAction.revision(action.rev)
+            val newAction = a.copy(exec = exec.inline(boas.toByteArray))
+            newAction.revision(a.rev)
             newAction
-          }
+          })
 
         case _ =>
           Future.successful(action)
       }
+    }
+  }
+
+  def attachmentHandler(action: WhiskAction, attached: Attached): WhiskAction = {
+    val eu = action.exec match {
+      case exec @ CodeExecAsAttachment(_, Attached(attachmentName, _, _, _), _) =>
+        require(
+          attachmentName == attached.attachmentName,
+          s"Attachment name '${attached.attachmentName}' does not match the expected name '$attachmentName'")
+        exec.attach(attached)
+      case exec => exec
+    }
+    action.copy(exec = eu).revision[WhiskAction](action.rev)
+  }
+
+  override def del[Wsuper >: WhiskAction](db: ArtifactStore[Wsuper], doc: DocInfo)(
+    implicit transid: TransactionId,
+    notifier: Option[CacheChangeNotification]): Future[Boolean] = {
+    Try {
+      require(db != null, "db undefined")
+      require(doc != null, "doc undefined")
+    }.map { _ =>
+      val fa = super.del(db, doc)
+      implicit val ec = db.executionContext
+      fa.flatMap { _ =>
+        super.deleteAttachments(db, doc)
+      }
+    } match {
+      case Success(f) => f
+      case Failure(f) => Future.failed(f)
     }
   }
 

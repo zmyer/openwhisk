@@ -1,8 +1,12 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more contributor
+# license agreements; and to You under the Apache License, Version 2.0.
 ---
 # This role will install a docker registry. If the registry existed, it will try to recycle its images.
 
 - name: "pull the {{ registry.version }} image of registry"
   shell: "docker pull registry:{{ registry.version }}"
+  register: result
+  until: (result.rc == 0)
   retries: "{{ docker.pull.retries }}"
   delay: "{{ docker.pull.delay }}"
 

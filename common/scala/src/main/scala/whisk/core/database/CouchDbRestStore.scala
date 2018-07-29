@@ -17,26 +17,23 @@
 
 package whisk.core.database
 
-import scala.concurrent.Await
-import scala.concurrent.Future
-import scala.concurrent.duration._
-
 import akka.actor.ActorSystem
 import akka.event.Logging.ErrorLevel
 import akka.http.scaladsl.model._
 import akka.stream.ActorMaterializer
 import akka.stream.scaladsl._
 import akka.util.ByteString
+import scala.concurrent.Await
+import scala.concurrent.duration._
 import spray.json._
-import whisk.common.Logging
-import whisk.common.LoggingMarkers
-import whisk.common.TransactionId
-import whisk.core.entity.BulkEntityResult
-import whisk.core.entity.DocInfo
-import whisk.core.entity.DocRevision
-import whisk.core.entity.WhiskDocument
+import whisk.common.{Logging, LoggingMarkers, MetricEmitter, TransactionId}
+import whisk.core.database.StoreUtils._
+import whisk.core.entity.Attachments.Attached
+import whisk.core.entity.{BulkEntityResult, DocInfo, DocumentReader, UUID}
 import whisk.http.Messages
-import whisk.core.entity.DocumentReader
+
+import scala.concurrent.Future
+import scala.util.Try
 
 /**
  * Basic client to put and delete artifacts in a data store.
@@ -55,16 +52,22 @@ class CouchDbRestStore[DocumentAbstraction <: DocumentSerializer](dbProtocol: St
                                                                   dbUsername: String,
                                                                   dbPassword: String,
                                                                   dbName: String,
-                                                                  useBatching: Boolean = false)(
+                                                                  useBatching: Boolean = false,
+                                                                  val inliningConfig: InliningConfig,
+                                                                  val attachmentStore: Option[AttachmentStore])(
   implicit system: ActorSystem,
   val logging: Logging,
   jsonFormat: RootJsonFormat[DocumentAbstraction],
-  materializer: ActorMaterializer,
+  val materializer: ActorMaterializer,
   docReader: DocumentReader)
     extends ArtifactStore[DocumentAbstraction]
-    with DefaultJsonProtocol {
+    with DefaultJsonProtocol
+    with AttachmentSupport[DocumentAbstraction] {
 
-  protected[core] implicit val executionContext = system.dispatcher
+  protected[core] implicit val executionContext = system.dispatchers.lookup("dispatchers.couch-dispatcher")
+
+  private val couchScheme = "couch"
+  val attachmentScheme: String = attachmentStore.map(_.scheme).getOrElse(couchScheme)
 
   private val client: CouchDbRestClient =
     new CouchDbRestClient(dbProtocol, dbHost, dbPort.toInt, dbUsername, dbPassword, dbName)
@@ -141,6 +144,8 @@ class CouchDbRestStore[DocumentAbstraction <: DocumentSerializer](dbProtocol: St
     val count = ds.size
     val start = transid.started(this, LoggingMarkers.DATABASE_BULK_SAVE, s"'$dbName' saving $count documents")
 
+    MetricEmitter.emitHistogramMetric(LoggingMarkers.DATABASE_BATCH_SIZE, ds.size)
+
     val f = client.putDocs(ds).map {
       _ match {
         case Right(response) =>
@@ -209,8 +214,10 @@ class CouchDbRestStore[DocumentAbstraction <: DocumentSerializer](dbProtocol: St
           ErrorLevel))
   }
 
-  override protected[database] def get[A <: DocumentAbstraction](doc: DocInfo)(implicit transid: TransactionId,
-                                                                               ma: Manifest[A]): Future[A] = {
+  override protected[database] def get[A <: DocumentAbstraction](doc: DocInfo,
+                                                                 attachmentHandler: Option[(A, Attached) => A] = None)(
+    implicit transid: TransactionId,
+    ma: Manifest[A]): Future[A] = {
 
     val start = transid.started(this, LoggingMarkers.DATABASE_GET, s"[GET] '$dbName' finding document: '$doc'")
 
@@ -225,27 +232,8 @@ class CouchDbRestStore[DocumentAbstraction <: DocumentSerializer](dbProtocol: St
       e match {
         case Right(response) =>
           transid.finished(this, start, s"[GET] '$dbName' completed: found document '$doc'")
-
-          val asFormat = try {
-            docReader.read(ma, response)
-          } catch {
-            case e: Exception => jsonFormat.read(response)
-          }
-
-          if (asFormat.getClass != ma.runtimeClass) {
-            throw DocumentTypeMismatchException(
-              s"document type ${asFormat.getClass} did not match expected type ${ma.runtimeClass}.")
-          }
-
-          val deserialized = asFormat.asInstanceOf[A]
-
-          val responseRev = response.fields("_rev").convertTo[String]
-          assert(doc.rev.rev == null || doc.rev.rev == responseRev, "Returned revision should match original argument")
-          // FIXME remove mutability from appropriate classes now that it is no longer required by GSON.
-          deserialized.asInstanceOf[WhiskDocument].revision(DocRevision(responseRev))
-
-          deserialized
-
+          val deserializedDoc = deserialize[A, DocumentAbstraction](doc, response)
+          attachmentHandler.map(processAttachments(deserializedDoc, response, _)).getOrElse(deserializedDoc)
         case Left(StatusCodes.NotFound) =>
           transid.finished(this, start, s"[GET] '$dbName', document: '${doc}'; not found.")
           // for compatibility
@@ -280,6 +268,8 @@ class CouchDbRestStore[DocumentAbstraction <: DocumentSerializer](dbProtocol: St
                                      stale: StaleParameter)(implicit transid: TransactionId): Future[List[JsObject]] = {
 
     require(!(reduce && includeDocs), "reduce and includeDocs cannot both be true")
+    require(skip >= 0, "skip should be non negative")
+    require(limit >= 0, "limit should be non negative")
 
     // Apparently you have to do that in addition to setting "descending"
     val (realStartKey, realEndKey) = if (descending) {
@@ -288,40 +278,40 @@ class CouchDbRestStore[DocumentAbstraction <: DocumentSerializer](dbProtocol: St
       (startKey, endKey)
     }
 
-    val parts = table.split("/")
+    val Array(firstPart, secondPart) = table.split("/")
 
     val start = transid.started(this, LoggingMarkers.DATABASE_QUERY, s"[QUERY] '$dbName' searching '$table")
 
-    val f = for (eitherResponse <- client.executeView(parts(0), parts(1))(
-                   startKey = realStartKey,
-                   endKey = realEndKey,
-                   skip = Some(skip),
-                   limit = Some(limit),
-                   stale = stale,
-                   includeDocs = includeDocs,
-                   descending = descending,
-                   reduce = reduce))
-      yield
-        eitherResponse match {
-          case Right(response) =>
-            val rows = response.fields("rows").convertTo[List[JsObject]]
+    val f = client
+      .executeView(firstPart, secondPart)(
+        startKey = realStartKey,
+        endKey = realEndKey,
+        skip = Some(skip),
+        limit = Some(limit),
+        stale = stale,
+        includeDocs = includeDocs,
+        descending = descending,
+        reduce = reduce)
+      .map {
+        case Right(response) =>
+          val rows = response.fields("rows").convertTo[List[JsObject]]
 
-            val out = if (reduce && !rows.isEmpty) {
-              assert(rows.length == 1, s"result of reduced view contains more than one value: '$rows'")
-              rows.head.fields("value").convertTo[List[JsObject]]
-            } else if (reduce) {
-              List(JsObject())
-            } else {
-              rows
-            }
+          val out = if (reduce && !rows.isEmpty) {
+            assert(rows.length == 1, s"result of reduced view contains more than one value: '$rows'")
+            rows.head.fields("value").convertTo[List[JsObject]]
+          } else if (reduce) {
+            List(JsObject.empty)
+          } else {
+            rows
+          }
 
-            transid.finished(this, start, s"[QUERY] '$dbName' completed: matched ${out.size}")
-            out
+          transid.finished(this, start, s"[QUERY] '$dbName' completed: matched ${out.size}")
+          out
 
-          case Left(code) =>
-            transid.failed(this, start, s"Unexpected http response code: $code", ErrorLevel)
-            throw new Exception("Unexpected http response code: " + code)
-        }
+        case Left(code) =>
+          transid.failed(this, start, s"Unexpected http response code: $code", ErrorLevel)
+          throw new Exception("Unexpected http response code: " + code)
+      }
 
     reportFailure(
       f,
@@ -329,11 +319,90 @@ class CouchDbRestStore[DocumentAbstraction <: DocumentSerializer](dbProtocol: St
         transid.failed(this, start, s"[QUERY] '$dbName' internal error, failure: '${failure.getMessage}'", ErrorLevel))
   }
 
-  override protected[core] def attach(
-    doc: DocInfo,
-    name: String,
+  protected[core] def count(table: String, startKey: List[Any], endKey: List[Any], skip: Int, stale: StaleParameter)(
+    implicit transid: TransactionId): Future[Long] = {
+    require(skip >= 0, "skip should be non negative")
+
+    val Array(firstPart, secondPart) = table.split("/")
+
+    val start = transid.started(this, LoggingMarkers.DATABASE_QUERY, s"[COUNT] '$dbName' searching '$table")
+
+    val f = client
+      .executeView(firstPart, secondPart)(startKey = startKey, endKey = endKey, stale = stale, reduce = true)
+      .map {
+        case Right(response) =>
+          val rows = response.fields("rows").convertTo[List[JsObject]]
+
+          val out = if (rows.nonEmpty) {
+            assert(rows.length == 1, s"result of reduced view contains more than one value: '$rows'")
+            val count = rows.head.fields("value").convertTo[Long]
+            if (count > skip) count - skip else 0L
+          } else 0L
+
+          transid.finished(this, start, s"[COUNT] '$dbName' completed: count $out")
+          out
+
+        case Left(code) =>
+          transid.failed(this, start, s"Unexpected http response code: $code", ErrorLevel)
+          throw new Exception("Unexpected http response code: " + code)
+      }
+
+    reportFailure(
+      f,
+      failure =>
+        transid.failed(this, start, s"[COUNT] '$dbName' internal error, failure: '${failure.getMessage}'", ErrorLevel))
+  }
+
+  override protected[database] def putAndAttach[A <: DocumentAbstraction](
+    doc: A,
+    update: (A, Attached) => A,
     contentType: ContentType,
-    docStream: Source[ByteString, _])(implicit transid: TransactionId): Future[DocInfo] = {
+    docStream: Source[ByteString, _],
+    oldAttachment: Option[Attached])(implicit transid: TransactionId): Future[(DocInfo, Attached)] = {
+
+    attachmentStore match {
+      case Some(as) =>
+        attachToExternalStore(doc, update, contentType, docStream, oldAttachment, as)
+      case None =>
+        attachToCouch(doc, update, contentType, docStream)
+    }
+  }
+
+  private def attachToCouch[A <: DocumentAbstraction](
+    doc: A,
+    update: (A, Attached) => A,
+    contentType: ContentType,
+    docStream: Source[ByteString, _])(implicit transid: TransactionId): Future[(DocInfo, Attached)] = {
+
+    if (maxInlineSize.toBytes == 0) {
+      val uri = uriFrom(scheme = attachmentScheme, path = UUID().asString)
+      for {
+        attached <- Future.successful(Attached(uri.toString, contentType))
+        i1 <- put(update(doc, attached))
+        i2 <- attach(i1, uri.path.toString, attached.attachmentType, docStream)
+      } yield (i2, attached)
+    } else {
+      for {
+        bytesOrSource <- inlineOrAttach(docStream)
+        uri = uriOf(bytesOrSource, UUID().asString)
+        attached <- {
+          val a = bytesOrSource match {
+            case Left(bytes) => Attached(uri.toString, contentType, Some(bytes.size), Some(digest(bytes)))
+            case Right(_)    => Attached(uri.toString, contentType)
+          }
+          Future.successful(a)
+        }
+        i1 <- put(update(doc, attached))
+        i2 <- bytesOrSource match {
+          case Left(_)  => Future.successful(i1)
+          case Right(s) => attach(i1, uri.path.toString, attached.attachmentType, s)
+        }
+      } yield (i2, attached)
+    }
+  }
+
+  private def attach(doc: DocInfo, name: String, contentType: ContentType, docStream: Source[ByteString, _])(
+    implicit transid: TransactionId): Future[DocInfo] = {
 
     val start = transid.started(
       this,
@@ -376,9 +445,28 @@ class CouchDbRestStore[DocumentAbstraction <: DocumentSerializer](dbProtocol: St
           ErrorLevel))
   }
 
-  override protected[core] def readAttachment[T](doc: DocInfo, name: String, sink: Sink[ByteString, Future[T]])(
-    implicit transid: TransactionId): Future[(ContentType, T)] = {
+  override protected[core] def readAttachment[T](doc: DocInfo, attached: Attached, sink: Sink[ByteString, Future[T]])(
+    implicit transid: TransactionId): Future[T] = {
+    val name = attached.attachmentName
+    val attachmentUri = Uri(name)
+    attachmentUri.scheme match {
+      case AttachmentSupport.MemScheme =>
+        memorySource(attachmentUri).runWith(sink)
+      case s if s == couchScheme || attachmentUri.isRelative =>
+        //relative case is for compatibility with earlier naming approach where attachment name would be like 'jarfile'
+        //Compared to current approach of '<scheme>:<name>'
+        readAttachmentFromCouch(doc, attachmentUri, sink)
+      case s if attachmentStore.isDefined && attachmentStore.get.scheme == s =>
+        attachmentStore.get.readAttachment(doc.id, attachmentUri.path.toString, sink)
+      case _ =>
+        throw new IllegalArgumentException(s"Unknown attachment scheme in attachment uri $attachmentUri")
+    }
+  }
 
+  private def readAttachmentFromCouch[T](doc: DocInfo, attachmentUri: Uri, sink: Sink[ByteString, Future[T]])(
+    implicit transid: TransactionId): Future[T] = {
+
+    val name = attachmentUri.path
     val start = transid.started(
       this,
       LoggingMarkers.DATABASE_ATT_GET,
@@ -387,28 +475,28 @@ class CouchDbRestStore[DocumentAbstraction <: DocumentSerializer](dbProtocol: St
     require(doc != null, "doc undefined")
     require(doc.rev.rev != null, "doc revision must be specified")
 
-    val f = client.getAttachment[T](doc.id.id, doc.rev.rev, name, sink)
-    val g = f.map { e =>
-      e match {
-        case Right((contentType, result)) =>
-          transid.finished(this, start, s"[ATT_GET] '$dbName' completed: found attachment '$name' of document '$doc'")
-          (contentType, result)
+    val g =
+      client
+        .getAttachment[T](doc.id.id, doc.rev.rev, attachmentUri.path.toString, sink)
+        .map {
+          case Right((_, result)) =>
+            transid.finished(this, start, s"[ATT_GET] '$dbName' completed: found attachment '$name' of document '$doc'")
+            result
 
-        case Left(StatusCodes.NotFound) =>
-          transid.finished(
-            this,
-            start,
-            s"[ATT_GET] '$dbName', retrieving attachment '$name' of document '$doc'; not found.")
-          throw NoDocumentException("Not found on 'readAttachment'.")
+          case Left(StatusCodes.NotFound) =>
+            transid.finished(
+              this,
+              start,
+              s"[ATT_GET] '$dbName', retrieving attachment '$name' of document '$doc'; not found.")
+            throw NoDocumentException("Not found on 'readAttachment'.")
 
-        case Left(code) =>
-          transid.failed(
-            this,
-            start,
-            s"[ATT_GET] '$dbName' failed to get attachment '$name' of document '$doc'; http status: '${code}'")
-          throw new Exception("Unexpected http response code: " + code)
-      }
-    }
+          case Left(code) =>
+            transid.failed(
+              this,
+              start,
+              s"[ATT_GET] '$dbName' failed to get attachment '$name' of document '$doc'; http status: '$code'")
+            throw new Exception("Unexpected http response code: " + code)
+        }
 
     reportFailure(
       g,
@@ -420,8 +508,50 @@ class CouchDbRestStore[DocumentAbstraction <: DocumentSerializer](dbProtocol: St
           ErrorLevel))
   }
 
+  override protected[core] def deleteAttachments[T](doc: DocInfo)(implicit transid: TransactionId): Future[Boolean] =
+    attachmentStore
+      .map(as => as.deleteAttachments(doc.id))
+      .getOrElse(Future.successful(true)) // For CouchDB it is expected that the entire document is deleted.
+
   override def shutdown(): Unit = {
-    Await.ready(client.shutdown(), 1.minute)
+    Await.result(client.shutdown(), 30.seconds)
+    attachmentStore.foreach(_.shutdown())
+  }
+
+  private def processAttachments[A <: DocumentAbstraction](doc: A,
+                                                           js: JsObject,
+                                                           attachmentHandler: (A, Attached) => A): A = {
+    js.fields
+      .get("_attachments")
+      .map {
+        case JsObject(fields) if fields.size == 1 =>
+          val (name, value) = fields.head
+          value.asJsObject.getFields("content_type", "digest", "length") match {
+            case Seq(JsString(contentTypeValue), JsString(digest), JsNumber(length)) =>
+              val contentType = ContentType.parse(contentTypeValue) match {
+                case Right(ct) => ct
+                case Left(_)   => ContentTypes.NoContentType //Should not happen
+              }
+              attachmentHandler(
+                doc,
+                Attached(getAttachmentName(name), contentType, Some(length.longValue()), Some(digest)))
+            case x =>
+              throw DeserializationException("Attachment json does not have required fields" + x)
+
+          }
+        case x => throw DeserializationException("Multiple attachments found" + x)
+      }
+      .getOrElse(doc)
+  }
+
+  /**
+   * Determines if the attachment scheme confirms to new UUID based scheme or not
+   * and generates the name based on that
+   */
+  private def getAttachmentName(name: String): String = {
+    Try(java.util.UUID.fromString(name))
+      .map(_ => uriFrom(scheme = attachmentScheme, path = name).toString)
+      .getOrElse(name)
   }
 
   private def reportFailure[T, U](f: Future[T], onFailure: Throwable => U): Future[T] = {

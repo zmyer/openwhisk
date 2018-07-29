@@ -1,7 +1,9 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more contributor
+# license agreements; and to You under the Apache License, Version 2.0.
 ---
-# Add docker user to the target host. 
+# Add docker user to the target host.
 # Set -e ansible_ssh_pass=xxx -e ansible_become_pass=xxx -e ansible_user=yyy when executing this playbook.
-# Also you need to have sshpass installed. 
+# Also you need to have sshpass installed.
 # (apt-get for ubuntu, for mac: brew install https://raw.githubusercontent.com/kadwanev/bigboybrew/master/Library/Formula/sshpass.rb)
 
 - name: add {{docker.user}} group

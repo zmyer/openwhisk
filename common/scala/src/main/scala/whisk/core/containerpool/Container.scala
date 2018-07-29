@@ -17,11 +17,11 @@
 
 package whisk.core.containerpool
 
+import akka.actor.ActorSystem
 import java.time.Instant
-
 import akka.stream.scaladsl.Source
 import akka.util.ByteString
-
+import pureconfig._
 import scala.concurrent.ExecutionContext
 import scala.concurrent.Future
 import scala.concurrent.duration.Duration
@@ -38,8 +38,10 @@ import whisk.core.entity.ActivationResponse
 import whisk.core.entity.ActivationResponse.ContainerConnectionError
 import whisk.core.entity.ActivationResponse.ContainerResponse
 import whisk.core.entity.ByteSize
-import whisk.core.entity.size._
 import whisk.http.Messages
+import akka.event.Logging.InfoLevel
+import whisk.core.ConfigKeys
+import whisk.core.entity.ActivationEntityLimit
 
 /**
  * An OpenWhisk biased container abstraction. This is **not only** an abstraction
@@ -55,13 +57,17 @@ case class ContainerAddress(val host: String, val port: Int = 8080) {
 
 trait Container {
 
+  implicit protected val as: ActorSystem
   protected val id: ContainerId
   protected val addr: ContainerAddress
   protected implicit val logging: Logging
   protected implicit val ec: ExecutionContext
 
+  protected[containerpool] val config: ContainerPoolConfig =
+    loadConfigOrThrow[ContainerPoolConfig](ConfigKeys.containerPool)
+
   /** HTTP connection to the container, will be lazily established by callContainer */
-  protected var httpConnection: Option[HttpUtils] = None
+  protected var httpConnection: Option[ContainerClient] = None
 
   /** Stops the container from consuming CPU cycles. */
   def suspend()(implicit transid: TransactionId): Future[Unit]
@@ -79,7 +85,11 @@ trait Container {
 
   /** Initializes code in the container. */
   def initialize(initializer: JsObject, timeout: FiniteDuration)(implicit transid: TransactionId): Future[Interval] = {
-    val start = transid.started(this, LoggingMarkers.INVOKER_ACTIVATION_INIT, s"sending initialization to $id $addr")
+    val start = transid.started(
+      this,
+      LoggingMarkers.INVOKER_ACTIVATION_INIT,
+      s"sending initialization to $id $addr",
+      logLevel = InfoLevel)
 
     val body = JsObject("value" -> initializer)
     callContainer("/init", body, timeout, retry = true)
@@ -89,7 +99,8 @@ trait Container {
             this,
             start.copy(start = r.interval.start),
             s"initialization result: ${r.toBriefString}",
-            endTime = r.interval.end)
+            endTime = r.interval.end,
+            logLevel = InfoLevel)
         case Failure(t) =>
           transid.failed(this, start, s"initializiation failed with $t")
       }
@@ -115,7 +126,11 @@ trait Container {
     implicit transid: TransactionId): Future[(Interval, ActivationResponse)] = {
     val actionName = environment.fields.get("action_name").map(_.convertTo[String]).getOrElse("")
     val start =
-      transid.started(this, LoggingMarkers.INVOKER_ACTIVATION_RUN, s"sending arguments to $actionName at $id $addr")
+      transid.started(
+        this,
+        LoggingMarkers.INVOKER_ACTIVATION_RUN,
+        s"sending arguments to $actionName at $id $addr",
+        logLevel = InfoLevel)
 
     val parameterWrapper = JsObject("value" -> parameters)
     val body = JsObject(parameterWrapper.fields ++ environment.fields)
@@ -126,7 +141,8 @@ trait Container {
             this,
             start.copy(start = r.interval.start),
             s"running result: ${r.toBriefString}",
-            endTime = r.interval.end)
+            endTime = r.interval.end,
+            logLevel = InfoLevel)
         case Failure(t) =>
           transid.failed(this, start, s"run failed with $t")
       }
@@ -155,16 +171,23 @@ trait Container {
     implicit transid: TransactionId): Future[RunResult] = {
     val started = Instant.now()
     val http = httpConnection.getOrElse {
-      val conn = new HttpUtils(s"${addr.host}:${addr.port}", timeout, 1.MB)
+      val conn = if (config.akkaClient) {
+        new AkkaContainerClient(addr.host, addr.port, timeout, ActivationEntityLimit.MAX_ACTIVATION_ENTITY_LIMIT, 1024)
+      } else {
+        new ApacheBlockingContainerClient(
+          s"${addr.host}:${addr.port}",
+          timeout,
+          ActivationEntityLimit.MAX_ACTIVATION_ENTITY_LIMIT)
+      }
       httpConnection = Some(conn)
       conn
     }
-    Future {
-      http.post(path, body, retry)
-    }.map { response =>
-      val finished = Instant.now()
-      RunResult(Interval(started, finished), response)
-    }
+    http
+      .post(path, body, retry)
+      .map { response =>
+        val finished = Instant.now()
+        RunResult(Interval(started, finished), response)
+      }
   }
 }
 

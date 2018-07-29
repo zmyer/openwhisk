@@ -44,6 +44,7 @@
   *           backendMethod    Required.  Action invocation REST verb.  "POST"
   *           backendUrl       Required.  Action invocation REST url
   *           authkey          Required.  Action invocation auth key
+  *           secureKey        Optional.  Action's require-whisk-auth value
   *      swagger             Required if gatewayBasePath not provided.  API swagger JSON
   *
   * NOTE: The package containing this action will be bound to the following values:
@@ -122,6 +123,7 @@ function main(message) {
     console.log('action backendUrl: '+doc.action.backendUrl);
     console.log('action backendMethod: '+doc.action.backendMethod);
     console.log('action authkey: '+utils.confidentialPrint(doc.action.authkey));
+    console.log('action secureKey: '+utils.confidentialPrint(doc.action.secureKey));
   }
   console.log('calledAsWebAction: '+calledAsWebAction);
   console.log('apidoc        :\n'+JSON.stringify(doc));
@@ -153,6 +155,10 @@ function main(message) {
         console.log('Add the provided API endpoint');
         return Promise.resolve(utils2.addEndpointToSwaggerApi(endpointDoc, doc, message.responsetype));
       }
+    })
+    .then(function(apiSwagger){
+      console.log("Validating Swagger doc before sending it to API GW.")
+      return utils2.validateFinalSwagger(apiSwagger);
     })
     .then(function(apiSwagger) {
       console.log('Final swagger API config: '+ JSON.stringify(apiSwagger));
@@ -206,6 +212,10 @@ function main(message) {
         console.log('Add the provided API endpoint');
         return Promise.resolve(utils.addEndpointToSwaggerApi(swaggerApi, doc));
       }
+    })
+    .then(function(apiSwagger){
+       console.log("Validating Swagger doc before sending it to API GW.")
+       return utils2.validateFinalSwagger(apiSwagger);
     })
     .then(function(swaggerApi) {
       console.log('Final swagger API config: '+ JSON.stringify(swaggerApi));

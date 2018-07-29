@@ -18,26 +18,26 @@
 package whisk.core.containerpool.docker
 
 import java.time.Instant
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicLong
-
 import akka.actor.ActorSystem
 import akka.stream._
 import akka.stream.scaladsl.Framing.FramingException
 import spray.json._
-
 import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration._
 import whisk.common.Logging
 import whisk.common.TransactionId
 import whisk.core.containerpool._
 import whisk.core.entity.ActivationResponse.{ConnectionError, MemoryExhausted}
-import whisk.core.entity.ByteSize
+import whisk.core.entity.{ActivationEntityLimit, ByteSize}
 import whisk.core.entity.size._
 import akka.stream.scaladsl.{Framing, Source}
 import akka.stream.stage._
 import akka.util.ByteString
 import spray.json._
 import whisk.core.containerpool.logging.LogLine
+import whisk.core.entity.ExecManifest.ImageName
 import whisk.http.Messages
 
 object DockerContainer {
@@ -53,9 +53,7 @@ object DockerContainer {
    * Creates a container running on a docker daemon.
    *
    * @param transid transaction creating the container
-   * @param image image to create the container from
-   * @param userProvidedImage whether the image is provided by the user
-   *     or is an OpenWhisk provided image
+   * @param image either a user provided (Left) or OpenWhisk provided (Right) image
    * @param memory memorylimit of the container
    * @param cpuShares sharefactor for the container
    * @param environment environment variables to set on the container
@@ -66,13 +64,12 @@ object DockerContainer {
    * @return a Future which either completes with a DockerContainer or one of two specific failures
    */
   def create(transid: TransactionId,
-             image: String,
-             userProvidedImage: Boolean = false,
+             image: Either[ImageName, String],
              memory: ByteSize = 256.MB,
              cpuShares: Int = 0,
-             environment: Map[String, String] = Map(),
+             environment: Map[String, String] = Map.empty,
              network: String = "bridge",
-             dnsServers: Seq[String] = Seq(),
+             dnsServers: Seq[String] = Seq.empty,
              name: Option[String] = None,
              useRunc: Boolean = true,
              dockerRunParameters: Map[String, Set[String]])(implicit docker: DockerApiWithFileAccess,
@@ -80,7 +77,7 @@ object DockerContainer {
                                                             as: ActorSystem,
                                                             ec: ExecutionContext,
                                                             log: Logging): Future[DockerContainer] = {
-    implicit val tid = transid
+    implicit val tid: TransactionId = transid
 
     val environmentArgs = environment.flatMap {
       case (key, value) => Seq("-e", s"$key=$value")
@@ -100,32 +97,54 @@ object DockerContainer {
       "--network",
       network) ++
       environmentArgs ++
+      dnsServers.flatMap(d => Seq("--dns", d)) ++
       name.map(n => Seq("--name", n)).getOrElse(Seq.empty) ++
       params
-    val pulled = if (userProvidedImage) {
-      docker.pull(image).recoverWith {
-        case _ => Future.failed(BlackboxStartupError(s"Failed to pull container image '${image}'."))
-      }
-    } else Future.successful(())
+
+    val imageToUse = image.fold(_.publicImageName, identity)
+
+    val pulled = image match {
+      case Left(userProvided) if userProvided.tag.map(_ == "latest").getOrElse(true) =>
+        // Iff the image tag is "latest" explicitly (or implicitly because no tag is given at all), failing to pull will
+        // fail the whole container bringup process, because it is expected to pick up the very latest "untagged"
+        // version every time.
+        docker.pull(imageToUse).map(_ => true).recoverWith {
+          case _ => Future.failed(BlackboxStartupError(Messages.imagePullError(imageToUse)))
+        }
+      case Left(_) =>
+        // Iff the image tag is something else than latest, we tolerate an outdated image if one is available locally.
+        // A `docker run` will be tried nonetheless to try to start a container (which will succeed if the image is
+        // already available locally)
+        docker.pull(imageToUse).map(_ => true).recover { case _ => false }
+      case Right(_) =>
+        // Iff we're not pulling at all (OpenWhisk provided image) we act as if the pull was successful.
+        Future.successful(true)
+    }
 
     for {
-      _ <- pulled
-      id <- docker.run(image, args).recoverWith {
-        case BrokenDockerContainer(brokenId, message) =>
+      pullSuccessful <- pulled
+      id <- docker.run(imageToUse, args).recoverWith {
+        case BrokenDockerContainer(brokenId, _) =>
           // Remove the broken container - but don't wait or check for the result.
           // If the removal fails, there is nothing we could do to recover from the recovery.
           docker.rm(brokenId)
-          Future.failed(
-            WhiskContainerStartupError(s"Failed to run container with image '${image}'. Removing broken container."))
+          Future.failed(WhiskContainerStartupError(Messages.resourceProvisionError))
         case _ =>
-          Future.failed(WhiskContainerStartupError(s"Failed to run container with image '${image}'."))
+          // Iff the pull was successful, we assume that the error is not due to an image pull error, otherwise
+          // the docker run was a backup measure to try and start the container anyway. If it fails again, we assume
+          // the image could still not be pulled and wasn't available locally.
+          if (pullSuccessful) {
+            Future.failed(WhiskContainerStartupError(Messages.resourceProvisionError))
+          } else {
+            Future.failed(BlackboxStartupError(Messages.imagePullError(imageToUse)))
+          }
       }
       ip <- docker.inspectIPAddress(id, network).recoverWith {
         // remove the container immediately if inspect failed as
         // we cannot recover that case automatically
         case _ =>
           docker.rm(id)
-          Future.failed(WhiskContainerStartupError(s"Failed to obtain IP address of container '${id.asString}'."))
+          Future.failed(WhiskContainerStartupError(Messages.resourceProvisionError))
       }
     } yield new DockerContainer(id, ip, useRunc)
   }
@@ -145,7 +164,7 @@ class DockerContainer(protected val id: ContainerId,
                       protected val addr: ContainerAddress,
                       protected val useRunc: Boolean)(implicit docker: DockerApiWithFileAccess,
                                                       runc: RuncApi,
-                                                      as: ActorSystem,
+                                                      override protected val as: ActorSystem,
                                                       protected val ec: ExecutionContext,
                                                       protected val logging: Logging)
     extends Container {
@@ -189,29 +208,37 @@ class DockerContainer(protected val id: ContainerId,
     implicit transid: TransactionId): Future[RunResult] = {
     val started = Instant.now()
     val http = httpConnection.getOrElse {
-      val conn = new HttpUtils(s"${addr.host}:${addr.port}", timeout, 1.MB)
+      val conn = if (config.akkaClient) {
+        new AkkaContainerClient(addr.host, addr.port, timeout, ActivationEntityLimit.MAX_ACTIVATION_ENTITY_LIMIT, 1024)
+      } else {
+        new ApacheBlockingContainerClient(
+          s"${addr.host}:${addr.port}",
+          timeout,
+          ActivationEntityLimit.MAX_ACTIVATION_ENTITY_LIMIT)
+      }
       httpConnection = Some(conn)
       conn
     }
-    Future {
-      http.post(path, body, retry)
-    }.flatMap { response =>
-      val finished = Instant.now()
 
-      response.left
-        .map {
-          // Only check for memory exhaustion if there was a
-          // terminal connection error.
-          case error: ConnectionError =>
-            isOomKilled().map {
-              case true  => MemoryExhausted()
-              case false => error
-            }
-          case other => Future.successful(other)
-        }
-        .fold(_.map(Left(_)), right => Future.successful(Right(right)))
-        .map(res => RunResult(Interval(started, finished), res))
-    }
+    http
+      .post(path, body, retry)
+      .flatMap { response =>
+        val finished = Instant.now()
+
+        response.left
+          .map {
+            // Only check for memory exhaustion if there was a
+            // terminal connection error.
+            case error: ConnectionError =>
+              isOomKilled().map {
+                case true  => MemoryExhausted()
+                case false => error
+              }
+            case other => Future.successful(other)
+          }
+          .fold(_.map(Left(_)), right => Future.successful(Right(right)))
+          .map(res => RunResult(Interval(started, finished), res))
+      }
   }
 
   /**
@@ -246,18 +273,21 @@ class DockerContainer(protected val id: ContainerId,
         size
       }
       .via(new CompleteAfterOccurrences(_.containsSlice(DockerContainer.ActivationSentinel), 2, waitForSentinel))
+      // As we're reading the logs after the activation has finished the invariant is that all loglines are already
+      // written and we mostly await them being flushed by the docker daemon. Therefore we can timeout based on the time
+      // between two loglines appear without relying on the log frequency in the action itself.
+      .idleTimeout(waitForLogs)
       .recover {
         case _: StreamLimitReachedException =>
           // While the stream has already ended by failing the limitWeighted stage above, we inject a truncation
           // notice downstream, which will be processed as usual. This will be the last element of the stream.
           ByteString(LogLine(Instant.now.toString, "stderr", Messages.truncateLogs(limit)).toJson.compactPrint)
-        case _: OccurrencesNotFoundException | _: FramingException =>
+        case _: OccurrencesNotFoundException | _: FramingException | _: TimeoutException =>
           // Stream has already ended and we insert a notice that data might be missing from the logs. While a
           // FramingException can also mean exceeding the limits, we cannot decide which case happened so we resort
           // to the general error message. This will be the last element of the stream.
           ByteString(LogLine(Instant.now.toString, "stderr", Messages.logFailure).toJson.compactPrint)
       }
-      .takeWithin(waitForLogs)
   }
 
   /** Delimiter used to split log-lines as written by the json-log-driver. */
@@ -279,9 +309,9 @@ class DockerContainer(protected val id: ContainerId,
  */
 class CompleteAfterOccurrences[T](isInEvent: T => Boolean, neededOccurrences: Int, errorOnNotEnough: Boolean)
     extends GraphStage[FlowShape[T, T]] {
-  val in = Inlet[T]("WaitForOccurances.in")
-  val out = Outlet[T]("WaitForOccurances.out")
-  override val shape = FlowShape.of(in, out)
+  val in: Inlet[T] = Inlet[T]("WaitForOccurrences.in")
+  val out: Outlet[T] = Outlet[T]("WaitForOccurrences.out")
+  override val shape: FlowShape[T, T] = FlowShape.of(in, out)
 
   override def createLogic(inheritedAttributes: Attributes): GraphStageLogic =
     new GraphStageLogic(shape) with InHandler with OutHandler {

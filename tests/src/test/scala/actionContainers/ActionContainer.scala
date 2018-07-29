@@ -21,25 +21,27 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.PrintWriter
 
+import scala.util.Try
 import scala.concurrent.Await
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Future
 import scala.concurrent.blocking
 import scala.concurrent.duration.Duration
 import scala.concurrent.duration.DurationInt
-import scala.language.postfixOps
 import scala.sys.process.ProcessLogger
 import scala.sys.process.stringToProcess
 import scala.util.Random
-
+import scala.util.{Failure, Success}
 import org.apache.commons.lang3.StringUtils
-import org.scalatest.FlatSpec
-import org.scalatest.Matchers
-
+import org.scalatest.{FlatSpec, Matchers}
 import akka.actor.ActorSystem
-import common.WhiskProperties
+import scala.concurrent.ExecutionContext
 import spray.json._
+import common.StreamLogging
+import whisk.common.Logging
+import whisk.common.TransactionId
 import whisk.core.entity.Exec
+import common.WhiskProperties
 
 /**
  * For testing convenience, this interface abstracts away the REST calls to a
@@ -48,24 +50,26 @@ import whisk.core.entity.Exec
 trait ActionContainer {
   def init(value: JsValue): (Int, Option[JsObject])
   def run(value: JsValue): (Int, Option[JsObject])
+  def runMultiple(values: Seq[JsValue])(implicit ec: ExecutionContext): Seq[(Int, Option[JsObject])]
 }
 
-trait ActionProxyContainerTestUtils extends FlatSpec with Matchers {
+trait ActionProxyContainerTestUtils extends FlatSpec with Matchers with StreamLogging {
   import ActionContainer.{filterSentinel, sentinel}
 
-  def initPayload(code: String, main: String = "main") = {
+  def initPayload(code: String, main: String = "main"): JsObject =
     JsObject(
       "value" -> JsObject(
         "code" -> { if (code != null) JsString(code) else JsNull },
         "main" -> JsString(main),
         "binary" -> JsBoolean(Exec.isBinaryCode(code))))
-  }
 
-  def runPayload(args: JsValue, other: Option[JsObject] = None) = {
+  def runPayload(args: JsValue, other: Option[JsObject] = None): JsObject =
     JsObject(Map("value" -> args) ++ (other map { _.fields } getOrElse Map()))
-  }
 
-  def checkStreams(out: String, err: String, additionalCheck: (String, String) => Unit, sentinelCount: Int = 1) = {
+  def checkStreams(out: String,
+                   err: String,
+                   additionalCheck: (String, String) => Unit,
+                   sentinelCount: Int = 1): Unit = {
     withClue("expected number of stdout sentinels") {
       sentinelCount shouldBe StringUtils.countMatches(out, sentinel)
     }
@@ -74,30 +78,70 @@ trait ActionProxyContainerTestUtils extends FlatSpec with Matchers {
     }
 
     val (o, e) = (filterSentinel(out), filterSentinel(err))
-    o should not include (sentinel)
-    e should not include (sentinel)
+    o should not include sentinel
+    e should not include sentinel
     additionalCheck(o, e)
   }
 }
 
 object ActionContainer {
   private lazy val dockerBin: String = {
-    List("/usr/bin/docker", "/usr/local/bin/docker")
-      .find { bin =>
-        new File(bin).isFile()
-      }
-      .getOrElse(???) // This fails if the docker binary couldn't be located.
+    List("/usr/bin/docker", "/usr/local/bin/docker").find { bin =>
+      new File(bin).isFile
+    }.get // This fails if the docker binary couldn't be located.
   }
 
-  private lazy val dockerCmd: String = {
-    val version = WhiskProperties.getProperty("whisk.version.name")
-    // Check if we are running on docker-machine env.
-    val hostStr = if (version.toLowerCase().contains("mac")) {
-      s" --host tcp://${WhiskProperties.getMainDockerEndpoint()} "
-    } else {
-      " "
+  lazy val dockerCmd: String = {
+    /*
+     * The docker host is set to a provided property 'docker.host' if it's
+     * available; otherwise we check with WhiskProperties to see whether we are
+     * running on a docker-machine.
+     *
+     * IMPLICATION:  The test must EITHER have the 'docker.host' system
+     * property set OR the 'OPENWHISK_HOME' environment variable set and a
+     * valid 'whisk.properties' file generated.  The 'docker.host' system
+     * property takes precedence.
+     *
+     * WARNING:  Adding a non-docker-machine environment that contains 'mac'
+     * (i.e. 'environments/local-mac') will likely break things.
+     *
+     * The plan is to move builds to using 'gradle-docker-plugin', which know
+     * its docker socket and to have it pass the docker socket implicitly using
+     * 'systemProperty "docker.host", docker.url'.  Eventually, we will also
+     * need to handle TLS certificates here.  Again, 'gradle-docker-plugin'
+     * knows where they are; we will just add system properties to get the
+     * information onto the docker command line.
+     */
+    val dockerCmdString = dockerBin +
+      sys.props
+        .get("docker.host")
+        .orElse(sys.env.get("DOCKER_HOST"))
+        .orElse {
+          Try { // whisk.properties file may not exist
+            // Check if we are running on docker-machine env.
+            Option(WhiskProperties.getProperty("environment.type"))
+              .filter(_.toLowerCase.contains("docker-machine"))
+              .map {
+                case _ => s"tcp://${WhiskProperties.getMainDockerEndpoint}"
+              }
+          }.toOption.flatten
+        }
+        .map(" --host " + _)
+        .getOrElse("")
+
+    // Test here that this actually works, otherwise throw a somewhat understandable error message
+    proc(s"$dockerCmdString info").onComplete {
+      case Success((v, _, _)) if v != 0 =>
+        throw new RuntimeException(s"""
+              |Unable to connect to docker host using $dockerCmdString as command string.
+              |The docker host is determined using the Java property 'docker.host' or
+              |the envirnoment variable 'DOCKER_HOST'. Please verify that one or the
+              |other is set for your build/test process.""".stripMargin)
+      case Success((v, _, _)) if v == 0 => // Do nothing
+      case Failure(t)                   => throw t
     }
-    s"$dockerBin $hostStr"
+
+    dockerCmdString
   }
 
   private def docker(command: String): String = s"$dockerCmd $command"
@@ -109,7 +153,7 @@ object ActionContainer {
       val err = new ByteArrayOutputStream
       val outW = new PrintWriter(out)
       val errW = new PrintWriter(err)
-      val v = cmd ! (ProcessLogger(outW.println, errW.println))
+      val v = cmd ! ProcessLogger(o => outW.println(o), e => errW.println(e))
       outW.close()
       errW.close()
       (v, out.toString, err.toString)
@@ -125,29 +169,50 @@ object ActionContainer {
 
   // Filters out the sentinel markers inserted by the container (see relevant private code in Invoker.scala)
   val sentinel = "XXX_THE_END_OF_A_WHISK_ACTIVATION_XXX"
-  def filterSentinel(str: String) = str.replaceAll(sentinel, "").trim
+  def filterSentinel(str: String): String = str.replaceAll(sentinel, "").trim
 
-  def withContainer(imageName: String, environment: Map[String, String] = Map.empty)(code: ActionContainer => Unit)(
-    implicit actorSystem: ActorSystem): (String, String) = {
+  def withContainer(imageName: String, environment: Map[String, String] = Map.empty)(
+    code: ActionContainer => Unit)(implicit actorSystem: ActorSystem, logging: Logging): (String, String) = {
     val rand = { val r = Random.nextInt; if (r < 0) -r else r }
     val name = imageName.toLowerCase.replaceAll("""[^a-z]""", "") + rand
-    val envArgs = environment.toSeq.map {
-      case (k, v) => s"-e ${k}=${v}"
-    } mkString (" ")
+    val envArgs = environment.toSeq
+      .map {
+        case (k, v) => s"-e $k=$v"
+      }
+      .mkString(" ")
 
-    // We create the container...
-    val runOut = awaitDocker(s"run --name $name $envArgs -d $imageName", 10 seconds)
-    assert(runOut._1 == 0, "'docker run' did not exit with 0: " + runOut)
+    // We create the container... and find out its IP address...
+    def createContainer(portFwd: Option[Int] = None): Unit = {
+      val runOut = awaitDocker(
+        s"run ${portFwd.map(p => s"-p $p:8080").getOrElse("")} --name $name $envArgs -d $imageName",
+        60.seconds)
+      assert(runOut._1 == 0, "'docker run' did not exit with 0: " + runOut)
+    }
 
     // ...find out its IP address...
-    val ipOut = awaitDocker(s"""inspect --format '{{.NetworkSettings.IPAddress}}' $name""", 10 seconds)
-    assert(ipOut._1 == 0, "'docker inspect did not exit with 0")
-    val ip = ipOut._2.replaceAll("""[^0-9.]""", "")
+    val (ip, port) =
+      if (System.getProperty("os.name").toLowerCase().contains("mac") && !sys.env
+            .get("DOCKER_HOST")
+            .exists(_.trim.nonEmpty)) {
+        // on MacOSX, where docker for mac does not permit communicating with container directly
+        val p = 8988 // port must be available or docker run will fail
+        createContainer(Some(p))
+        Thread.sleep(1500) // let container/server come up cleanly
+        ("localhost", p)
+      } else {
+        // not "mac" i.e., docker-for-mac, use direct container IP directly (this is OK for Ubuntu, and docker-machine)
+        createContainer()
+        val ipOut = awaitDocker(s"""inspect --format '{{.NetworkSettings.IPAddress}}' $name""", 10.seconds)
+        assert(ipOut._1 == 0, "'docker inspect did not exit with 0")
+        (ipOut._2.replaceAll("""[^0-9.]""", ""), 8080)
+      }
 
     // ...we create an instance of the mock container interface...
     val mock = new ActionContainer {
-      def init(value: JsValue) = syncPost(ip, 8080, "/init", value)
-      def run(value: JsValue) = syncPost(ip, 8080, "/run", value)
+      def init(value: JsValue): (Int, Option[JsObject]) = syncPost(ip, port, "/init", value)
+      def run(value: JsValue): (Int, Option[JsObject]) = syncPost(ip, port, "/run", value)
+      def runMultiple(values: Seq[JsValue])(implicit ec: ExecutionContext): Seq[(Int, Option[JsObject])] =
+        concurrentSyncPost(ip, port, "/run", values)
     }
 
     try {
@@ -155,20 +220,30 @@ object ActionContainer {
       code(mock)
       // I'm told this is good for the logs.
       Thread.sleep(100)
-      val (_, out, err) = awaitDocker(s"logs $name", 10 seconds)
+      val (_, out, err) = awaitDocker(s"logs $name", 10.seconds)
       (out, err)
     } finally {
-      awaitDocker(s"kill $name", 10 seconds)
-      awaitDocker(s"rm $name", 10 seconds)
+      awaitDocker(s"kill $name", 10.seconds)
+      awaitDocker(s"rm $name", 10.seconds)
     }
   }
 
-  private def syncPost(host: String, port: Int, endPoint: String, content: JsValue): (Int, Option[JsObject]) = {
-    whisk.core.containerpool.HttpUtils.post(host, port, endPoint, content)
+  private def syncPost(host: String, port: Int, endPoint: String, content: JsValue)(
+    implicit logging: Logging,
+    as: ActorSystem): (Int, Option[JsObject]) = {
+
+    implicit val transid = TransactionId.testing
+
+    whisk.core.containerpool.AkkaContainerClient.post(host, port, endPoint, content, 30.seconds)
+  }
+  private def concurrentSyncPost(host: String, port: Int, endPoint: String, contents: Seq[JsValue])(
+    implicit logging: Logging,
+    ec: ExecutionContext,
+    as: ActorSystem): Seq[(Int, Option[JsObject])] = {
+
+    implicit val transid = TransactionId.testing
+
+    whisk.core.containerpool.AkkaContainerClient.concurrentPost(host, port, endPoint, contents, 30.seconds)
   }
 
-  private class ActionContainerImpl() extends ActionContainer {
-    override def init(value: JsValue) = ???
-    override def run(value: JsValue) = ???
-  }
 }

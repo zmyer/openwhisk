@@ -71,7 +71,7 @@ case class WhiskPackage(namespace: EntityPath,
                         version: SemVer = SemVer(),
                         publish: Boolean = false,
                         annotations: Parameters = Parameters())
-    extends WhiskEntity(name) {
+    extends WhiskEntity(name, "package") {
 
   require(binding != null || (binding map { _ != null } getOrElse true), "binding undefined")
 
@@ -96,13 +96,7 @@ case class WhiskPackage(namespace: EntityPath,
   /**
    * Gets binding for package iff this is not already a package reference.
    */
-  def bind: Option[Binding] = {
-    if (binding.isDefined) {
-      None
-    } else {
-      Some(Binding(namespace.root, name))
-    }
-  }
+  def bind: Option[Binding] = if (binding.isEmpty) Some(Binding(namespace.root, name)) else None
 
   /**
    * Adds actions to package. The actions list is filtered so that only actions that
@@ -137,9 +131,14 @@ case class WhiskPackage(namespace: EntityPath,
 
   def toJson = WhiskPackage.serdes.write(this).asJsObject
 
+  /**
+   * This the package summary as computed by the database view.
+   * Strictly used in view testing to enforce alignment.
+   */
   override def summaryAsJson = {
-    val JsObject(fields) = super.summaryAsJson
-    JsObject(fields + (WhiskPackage.bindingFieldName -> binding.isDefined.toJson))
+    JsObject(
+      super.summaryAsJson.fields +
+        (WhiskPackage.bindingFieldName -> binding.map(Binding.serdes.write(_)).getOrElse(JsBoolean(false))))
   }
 }
 
@@ -202,6 +201,8 @@ object WhiskPackage
   }
 
   override val cacheEnabled = true
+
+  lazy val publicPackagesView: View = WhiskEntityQueries.view(collection = s"$collectionName-public")
 }
 
 /**
@@ -231,14 +232,14 @@ object Binding extends ArgNormalizer[Binding] with DefaultJsonProtocol {
 
   protected[entity] val optionalBindingDeserializer = new JsonReader[Option[Binding]] {
     override def read(js: JsValue) = {
-      if (js == JsObject()) None else Some(serdes.read(js))
+      if (js == JsObject.empty) None else Some(serdes.read(js))
     }
 
   }
 
   protected[entity] val optionalBindingSerializer = new JsonWriter[Option[Binding]] {
     override def write(b: Option[Binding]) = b match {
-      case None    => JsObject()
+      case None    => JsObject.empty
       case Some(n) => Binding.serdes.write(n)
     }
   }
@@ -274,14 +275,14 @@ object WhiskPackageWithActions {
             as map { a =>
               WhiskPackageAction.serdes.read(a)
             } toList
-          case _ => List()
+          case _ => List.empty
         }
         val feeds = value.asJsObject.getFields("feeds") match {
           case Seq(JsArray(as)) =>
             as map { a =>
               WhiskPackageAction.serdes.read(a)
             } toList
-          case _ => List()
+          case _ => List.empty
         }
         WhiskPackageWithActions(pkg, actions, feeds)
       } getOrElse deserializationError("whisk package with actions malformed")

@@ -18,69 +18,87 @@
 package whisk.connector.kafka
 
 import java.util.Properties
-import java.util.concurrent.ExecutionException
 
-import scala.concurrent.ExecutionContext
-import scala.concurrent.duration.FiniteDuration
-import scala.collection.JavaConverters._
-
-import org.apache.kafka.clients.admin.AdminClientConfig
-import org.apache.kafka.clients.admin.AdminClient
-import org.apache.kafka.clients.admin.NewTopic
-import org.apache.kafka.common.errors.TopicExistsException
-
-import whisk.common.Logging
-import whisk.core.WhiskConfig
-import whisk.core.connector.MessageConsumer
-import whisk.core.connector.MessageProducer
-import whisk.core.connector.MessagingProvider
-
+import akka.actor.ActorSystem
+import org.apache.kafka.clients.admin.{AdminClient, AdminClientConfig, NewTopic}
+import org.apache.kafka.common.errors.{RetriableException, TopicExistsException}
 import pureconfig._
+import whisk.common.{CausedBy, Logging}
+import whisk.core.{ConfigKeys, WhiskConfig}
+import whisk.core.connector.{MessageConsumer, MessageProducer, MessagingProvider}
+
+import scala.collection.JavaConverters._
+import scala.concurrent.duration._
+import scala.util.{Failure, Success, Try}
 
 case class KafkaConfig(replicationFactor: Short)
-
-case class TopicConfig(segmentBytes: Long, retentionBytes: Long, retentionMs: Long) {
-  def toMap: Map[String, String] = {
-    Map(
-      "retention.bytes" -> retentionBytes.toString,
-      "retention.ms" -> retentionMs.toString,
-      "segment.bytes" -> segmentBytes.toString)
-  }
-}
 
 /**
  * A Kafka based implementation of MessagingProvider
  */
 object KafkaMessagingProvider extends MessagingProvider {
+  import KafkaConfiguration._
+
   def getConsumer(config: WhiskConfig, groupId: String, topic: String, maxPeek: Int, maxPollInterval: FiniteDuration)(
-    implicit logging: Logging): MessageConsumer =
-    new KafkaConsumerConnector(config.kafkaHosts, groupId, topic, maxPeek, maxPollInterval = maxPollInterval)
+    implicit logging: Logging,
+    actorSystem: ActorSystem): MessageConsumer =
+    new KafkaConsumerConnector(config.kafkaHosts, groupId, topic, maxPeek)
 
-  def getProducer(config: WhiskConfig, ec: ExecutionContext)(implicit logging: Logging): MessageProducer =
-    new KafkaProducerConnector(config.kafkaHosts, ec)
+  def getProducer(config: WhiskConfig)(implicit logging: Logging, actorSystem: ActorSystem): MessageProducer =
+    new KafkaProducerConnector(config.kafkaHosts)
 
-  def ensureTopic(config: WhiskConfig, topic: String, topicConfig: String)(implicit logging: Logging): Boolean = {
-    val kc = loadConfigOrThrow[KafkaConfig]("whisk.kafka")
-    val tc = loadConfigOrThrow[TopicConfig](s"whisk.kafka.topics.$topicConfig")
-    val props = new Properties
-    props.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, config.kafkaHosts)
-    val client = AdminClient.create(props)
-    val numPartitions = 1
-    val nt = new NewTopic(topic, numPartitions, kc.replicationFactor).configs(tc.toMap.asJava)
-    val results = client.createTopics(List(nt).asJava)
-    try {
-      results.values().get(topic).get()
-      logging.info(this, s"created topic $topic")
-      true
-    } catch {
-      case e: ExecutionException if e.getCause.isInstanceOf[TopicExistsException] =>
-        logging.info(this, s"topic $topic already existed")
-        true
-      case e: Exception =>
-        logging.error(this, s"ensureTopic for $topic failed due to $e")
-        false
-    } finally {
-      client.close()
+  def ensureTopic(config: WhiskConfig, topic: String, topicConfigKey: String)(implicit logging: Logging): Try[Unit] = {
+    val kafkaConfig = loadConfigOrThrow[KafkaConfig](ConfigKeys.kafka)
+    val topicConfig = KafkaConfiguration.configMapToKafkaConfig(
+      loadConfigOrThrow[Map[String, String]](ConfigKeys.kafkaTopics + "." + topicConfigKey))
+
+    val commonConfig = configMapToKafkaConfig(loadConfigOrThrow[Map[String, String]](ConfigKeys.kafkaCommon))
+    val client = AdminClient.create(commonConfig + (AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG -> config.kafkaHosts))
+    val partitions = 1
+    val nt = new NewTopic(topic, partitions, kafkaConfig.replicationFactor).configs(topicConfig.asJava)
+
+    def createTopic(retries: Int = 5): Try[Unit] = {
+      Try(client.createTopics(List(nt).asJava).values().get(topic).get())
+        .map(_ => logging.info(this, s"created topic $topic"))
+        .recoverWith {
+          case CausedBy(_: TopicExistsException) =>
+            Success(logging.info(this, s"topic $topic already existed"))
+          case CausedBy(t: RetriableException) if retries > 0 =>
+            logging.warn(this, s"topic $topic could not be created because of $t, retries left: $retries")
+            Thread.sleep(1.second.toMillis)
+            createTopic(retries - 1)
+          case t =>
+            logging.error(this, s"ensureTopic for $topic failed due to $t")
+            Failure(t)
+        }
     }
+
+    val result = createTopic()
+
+    client.close()
+    result
+  }
+}
+
+object KafkaConfiguration {
+  import scala.language.implicitConversions
+
+  implicit def mapToProperties(map: Map[String, String]): Properties = {
+    val props = new Properties()
+    map.foreach { case (key, value) => props.setProperty(key, value) }
+    props
+  }
+
+  /**
+   * Converts TypesafeConfig keys to a KafkaConfig key.
+   *
+   * TypesafeConfig's keys are usually kebab-cased (dash-delimited), whereas KafkaConfig keys are dot.delimited. This
+   * converts an example-key-to-illustrate to example.key.to.illustrate.
+   */
+  def configToKafkaKey(configKey: String): String = configKey.replace("-", ".")
+
+  /** Converts a Map read from TypesafeConfig to a Map to be read by Kafka clients. */
+  def configMapToKafkaConfig(configMap: Map[String, String]): Map[String, String] = configMap.map {
+    case (key, value) => configToKafkaKey(key) -> value
   }
 }

@@ -18,21 +18,19 @@
 package whisk.core.controller.test
 
 import scala.language.postfixOps
-
 import org.junit.runner.RunWith
 import org.scalatest.junit.JUnitRunner
-
 import akka.http.scaladsl.model.StatusCodes._
 import akka.http.scaladsl.marshallers.sprayjson.SprayJsonSupport._
 import akka.http.scaladsl.server.Route
-
 import spray.json.DefaultJsonProtocol._
 import spray.json._
-
 import whisk.core.controller.WhiskRulesApi
+import whisk.core.entitlement.Collection
 import whisk.core.entity._
 import whisk.core.entity.test.OldWhiskTrigger
 import whisk.http.ErrorResponse
+
 import scala.language.postfixOps
 import whisk.core.entity.test.OldWhiskRule
 import whisk.http.Messages
@@ -72,30 +70,70 @@ class RulesApiTests extends ControllerTestCommon with WhiskRulesApi {
       WhiskRule(namespace, aname(), afullname(namespace, "bogus trigger"), afullname(namespace, "bogus action"))
     }.toList
     rules foreach { put(entityStore, _) }
-    waitOnView(entityStore, WhiskRule, namespace, 2)
+    waitOnView(entityStore, WhiskRule, namespace, 2, includeDocs = true)
     Get(s"$collectionPath") ~> Route.seal(routes(creds)) ~> check {
       status should be(OK)
       val response = responseAs[List[JsObject]]
       rules.length should be(response.length)
-      rules forall { r =>
-        response contains r.summaryAsJson
-      } should be(true)
+      response should contain theSameElementsAs rules.map(_.toJson)
     }
 
-    // it should "list trirulesggers with explicit namespace owned by subject" in {
+    // it should "list rules with explicit namespace owned by subject" in {
     Get(s"/$namespace/${collection.path}") ~> Route.seal(routes(creds)) ~> check {
       status should be(OK)
       val response = responseAs[List[JsObject]]
       rules.length should be(response.length)
-      rules forall { r =>
-        response contains r.summaryAsJson
-      } should be(true)
+      response should contain theSameElementsAs rules.map(_.toJson)
     }
 
     // it should "reject list rules with explicit namespace not owned by subject" in {
     val auser = WhiskAuthHelpers.newIdentity()
     Get(s"/$namespace/${collection.path}") ~> Route.seal(routes(auser)) ~> check {
       status should be(Forbidden)
+    }
+  }
+
+  it should "reject list when limit is greater than maximum allowed value" in {
+    implicit val tid = transid()
+    val exceededMaxLimit = Collection.MAX_LIST_LIMIT + 1
+    val response = Get(s"$collectionPath?limit=$exceededMaxLimit") ~> Route.seal(routes(creds)) ~> check {
+      status should be(BadRequest)
+      responseAs[String] should include {
+        Messages.listLimitOutOfRange(Collection.RULES, exceededMaxLimit, Collection.MAX_LIST_LIMIT)
+      }
+    }
+  }
+
+  it should "reject list when limit is not an integer" in {
+    implicit val tid = transid()
+    val notAnInteger = "string"
+    val response = Get(s"$collectionPath?limit=$notAnInteger") ~> Route.seal(routes(creds)) ~> check {
+      status should be(BadRequest)
+      responseAs[String] should include {
+        Messages.argumentNotInteger(Collection.RULES, notAnInteger)
+      }
+    }
+  }
+
+  it should "reject list when skip is negative" in {
+    implicit val tid = transid()
+    val negativeSkip = -1
+    val response = Get(s"$collectionPath?skip=$negativeSkip") ~> Route.seal(routes(creds)) ~> check {
+      status should be(BadRequest)
+      responseAs[String] should include {
+        Messages.listSkipOutOfRange(Collection.RULES, negativeSkip)
+      }
+    }
+  }
+
+  it should "reject list when skip is not an integer" in {
+    implicit val tid = transid()
+    val notAnInteger = "string"
+    val response = Get(s"$collectionPath?skip=$notAnInteger") ~> Route.seal(routes(creds)) ~> check {
+      status should be(BadRequest)
+      responseAs[String] should include {
+        Messages.argumentNotInteger(Collection.RULES, notAnInteger)
+      }
     }
   }
 
@@ -107,14 +145,12 @@ class RulesApiTests extends ControllerTestCommon with WhiskRulesApi {
       WhiskRule(namespace, aname(), afullname(namespace, "bogus trigger"), afullname(namespace, "bogus action"))
     }.toList
     rules foreach { put(entityStore, _) }
-    waitOnView(entityStore, WhiskRule, namespace, 2)
+    waitOnView(entityStore, WhiskRule, namespace, 2, includeDocs = true)
     Get(s"$collectionPath?docs=true") ~> Route.seal(routes(creds)) ~> check {
       status should be(OK)
       val response = responseAs[List[WhiskRule]]
       rules.length should be(response.length)
-      rules forall { r =>
-        response contains r
-      } should be(true)
+      response should contain theSameElementsAs rules.map(_.toJson)
     }
   }
 
@@ -560,7 +596,7 @@ class RulesApiTests extends ControllerTestCommon with WhiskRulesApi {
         WhiskRuleResponse(
           namespace,
           rule.name,
-          Status.ACTIVE,
+          Status.INACTIVE,
           trigger.fullyQualifiedName(false),
           action.fullyQualifiedName(false),
           version = SemVer().upPatch))
@@ -591,7 +627,7 @@ class RulesApiTests extends ControllerTestCommon with WhiskRulesApi {
         WhiskRuleResponse(
           namespace,
           rule.name,
-          Status.ACTIVE,
+          Status.INACTIVE,
           trigger.fullyQualifiedName(false),
           action.fullyQualifiedName(false),
           version = SemVer().upPatch))
@@ -622,7 +658,7 @@ class RulesApiTests extends ControllerTestCommon with WhiskRulesApi {
         WhiskRuleResponse(
           namespace,
           rule.name,
-          Status.ACTIVE,
+          Status.INACTIVE,
           trigger.fullyQualifiedName(false),
           action.fullyQualifiedName(false),
           version = SemVer().upPatch))
@@ -653,7 +689,7 @@ class RulesApiTests extends ControllerTestCommon with WhiskRulesApi {
         WhiskRuleResponse(
           namespace,
           rule.name,
-          Status.ACTIVE,
+          Status.INACTIVE,
           trigger.fullyQualifiedName(false),
           action.fullyQualifiedName(false),
           version = SemVer().upPatch))
@@ -681,7 +717,7 @@ class RulesApiTests extends ControllerTestCommon with WhiskRulesApi {
         WhiskRuleResponse(
           namespace,
           rule.name,
-          Status.ACTIVE,
+          Status.INACTIVE,
           trigger.fullyQualifiedName(false),
           action.fullyQualifiedName(false),
           version = SemVer().upPatch))

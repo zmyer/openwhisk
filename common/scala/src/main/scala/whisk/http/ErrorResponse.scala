@@ -109,14 +109,29 @@ object Messages {
   val bindingCannotReferenceBinding = "Cannot bind to another package binding."
   val requestedBindingIsNotValid = "Cannot bind to a resource that is not a package."
   val notAllowedOnBinding = "Operation not permitted on package binding."
-  def packageNameIsReserved(name: String) = {
-    s"Package name '$name' is reserved."
+  def packageNameIsReserved(name: String) = s"Package name '$name' is reserved."
+
+  /** Error messages for triggers */
+  def triggerWithInactiveRule(rule: String, action: String) = {
+    s"Rule '$rule' is inactive, action '$action' was not activated."
   }
 
   /** Error messages for sequence activations. */
   def sequenceRetrieveActivationTimeout(id: ActivationId) =
     s"Timeout reached when retrieving activation $id for sequence component."
   val sequenceActivationFailure = "Sequence failed."
+
+  /** Error messages for compositions. */
+  val compositionIsTooLong = "Too many actions in the composition."
+  val compositionActivationFailure = "Activation failure during composition."
+  def compositionActivationTimeout(id: ActivationId) =
+    s"Timeout reached when retrieving activation $id during composition."
+  def compositionComponentInvalid(value: JsValue) =
+    s"Failed to parse action name from json value $value during composition."
+  def compositionComponentNotFound(name: String) =
+    s"Failed to resolve action with name '$name' during composition."
+  def compositionComponentNotAccessible(name: String) =
+    s"Failed entitlement check for action with name '$name' during composition."
 
   /** Error messages for bad requests where parameters do not conform. */
   val parametersNotAllowed = "Request defines parameters that are not allowed (e.g., reserved properties)."
@@ -126,6 +141,7 @@ object Messages {
   val abnormalInitialization = "The action did not initialize and exited unexpectedly."
   val abnormalRun = "The action did not produce a valid response and exited unexpectedly."
   val memoryExhausted = "The action exhausted its memory and was aborted."
+  val docsNotAllowedWithCount = "The parameter 'docs' is not permitted with 'count'."
   def badNameFilter(value: String) = s"Parameter may be a 'simple' name or 'package-name/simple' name: $value"
   def badEpoch(value: String) = s"Parameter is not a valid value for epoch seconds: $value"
 
@@ -133,7 +149,14 @@ object Messages {
   def entityTooBig(error: SizeError) = {
     s"${error.field} larger than allowed: ${error.is.toBytes} > ${error.allowed.toBytes} bytes."
   }
-  def maxActivationLimitExceeded(value: Int, max: Int) = s"Activation limit of $value exceeds maximum limit of $max."
+
+  def listLimitOutOfRange(collection: String, value: Int, max: Int) = {
+    s"The value '$value' is not in the range of 0 to $max for $collection."
+  }
+  def listSkipOutOfRange(collection: String, value: Int) = {
+    s"The value '$value' is not greater than or equal to 0 for $collection."
+  }
+  def argumentNotInteger(collection: String, value: String) = s"The value '$value' is not an integer for $collection."
 
   def truncateLogs(limit: ByteSize) = {
     s"Logs were truncated because the total bytes size exceeds the limit of ${limit.toBytes} bytes."
@@ -185,8 +208,17 @@ object Messages {
     }
   }
 
+  val namespacesBlacklisted = "The action was not invoked due to a blacklisted namespace."
+
   val actionRemovedWhileInvoking = "Action could not be found or may have been deleted."
   val actionMismatchWhileInvoking = "Action version is not compatible and cannot be invoked."
+  val actionFetchErrorWhileInvoking = "Action could not be fetched."
+
+  /** Indicates that the image could not be pulled. */
+  def imagePullError(image: String) = s"Failed to pull container image '$image'."
+
+  /** Indicates that the container for the action could not be started. */
+  val resourceProvisionError = "Failed to provision resources to run the action."
 }
 
 /** Replaces rejections with Json object containing cause and transaction id. */
@@ -224,7 +256,7 @@ object ErrorResponse extends Directives with DefaultJsonProtocol {
     def read(v: JsValue) =
       Try {
         v.asJsObject.getFields("error", "code") match {
-          case Seq(JsString(error), JsNumber(code)) =>
+          case Seq(JsString(error), JsString(code)) =>
             ErrorResponse(error, TransactionId(code))
           case Seq(JsString(error)) =>
             ErrorResponse(error, TransactionId.unknown)

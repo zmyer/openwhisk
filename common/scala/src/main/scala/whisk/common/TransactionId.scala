@@ -17,20 +17,17 @@
 
 package whisk.common
 
-import java.time.Clock
-import java.time.Duration
-import java.time.Instant
-import java.util.concurrent.atomic.AtomicInteger
+import java.time.{Clock, Duration, Instant}
 
-import scala.math.BigDecimal.int2bigDecimal
+import akka.event.Logging.{DebugLevel, InfoLevel, LogLevel, WarningLevel}
+import akka.http.scaladsl.model.headers.RawHeader
+import pureconfig.loadConfigOrThrow
+import spray.json._
+import whisk.core.ConfigKeys
+import pureconfig._
+import whisk.common.tracing.WhiskTracerProvider
+
 import scala.util.Try
-
-import akka.event.Logging.{InfoLevel, WarningLevel}
-import akka.event.Logging.LogLevel
-import spray.json.JsArray
-import spray.json.JsNumber
-import spray.json.JsValue
-import spray.json.RootJsonFormat
 
 /**
  * A transaction id for tracking operations in the system that are specific to a request.
@@ -39,32 +36,29 @@ import spray.json.RootJsonFormat
  */
 case class TransactionId private (meta: TransactionMetadata) extends AnyVal {
   def id = meta.id
-  override def toString = {
-    if (meta.id > 0) s"#tid_${meta.id}"
-    else if (meta.id < 0) s"#sid_${-meta.id}"
-    else "??"
-  }
+  override def toString = s"#tid_${meta.id}"
+
+  def toHeader = RawHeader(TransactionId.generatorConfig.header, meta.id)
 
   /**
    * Method to count events.
    *
    * @param from Reference, where the method was called from.
    * @param marker A LogMarkerToken. They are defined in <code>LoggingMarkers</code>.
-   * @param message An additional message that is written into the log, together with the other information.
+   * @param message An additional message to be written into the log, together with the other information.
    * @param logLevel The Loglevel, the message should have. Default is <code>InfoLevel</code>.
    */
-  def mark(from: AnyRef, marker: LogMarkerToken, message: String = "", logLevel: LogLevel = InfoLevel)(
+  def mark(from: AnyRef, marker: LogMarkerToken, message: => String = "", logLevel: LogLevel = DebugLevel)(
     implicit logging: Logging) = {
 
     if (TransactionId.metricsLog) {
-      logging.emit(logLevel, this, from, createMessageWithMarker(message, LogMarker(marker, deltaToStart)))
-    } else if (message.nonEmpty) {
+      // marker received with a debug level will be emitted on info level
+      logging.emit(InfoLevel, this, from, createMessageWithMarker(message, LogMarker(marker, deltaToStart)))
+    } else {
       logging.emit(logLevel, this, from, message)
     }
 
-    if (TransactionId.metricsKamon) {
-      MetricEmitter.emitCounterMetric(marker)
-    }
+    MetricEmitter.emitCounterMetric(marker)
 
   }
 
@@ -74,24 +68,25 @@ case class TransactionId private (meta: TransactionMetadata) extends AnyVal {
    *
    * @param from Reference, where the method was called from.
    * @param marker A LogMarkerToken. They are defined in <code>LoggingMarkers</code>.
-   * @param message An additional message that is written into the log, together with the other information.
+   * @param message An additional message to be written into the log, together with the other information.
    * @param logLevel The Loglevel, the message should have. Default is <code>InfoLevel</code>.
    *
    * @return startMarker that has to be passed to the finished or failed method to calculate the time difference.
    */
-  def started(from: AnyRef, marker: LogMarkerToken, message: String = "", logLevel: LogLevel = InfoLevel)(
+  def started(from: AnyRef, marker: LogMarkerToken, message: => String = "", logLevel: LogLevel = DebugLevel)(
     implicit logging: Logging): StartMarker = {
 
     if (TransactionId.metricsLog) {
-      logging.emit(logLevel, this, from, createMessageWithMarker(message, LogMarker(marker, deltaToStart)))
-    } else if (message.nonEmpty) {
+      // marker received with a debug level will be emitted on info level
+      logging.emit(InfoLevel, this, from, createMessageWithMarker(message, LogMarker(marker, deltaToStart)))
+    } else {
       logging.emit(logLevel, this, from, message)
     }
 
-    if (TransactionId.metricsKamon) {
-      MetricEmitter.emitCounterMetric(marker)
-    }
+    MetricEmitter.emitCounterMetric(marker)
 
+    //tracing support
+    WhiskTracerProvider.tracer.startSpan(marker, this)
     StartMarker(Instant.now, marker)
   }
 
@@ -100,33 +95,35 @@ case class TransactionId private (meta: TransactionMetadata) extends AnyVal {
    *
    * @param from Reference, where the method was called from.
    * @param startMarker <code>StartMarker</code> returned by a <code>starting</code> method.
-   * @param message An additional message that is written into the log, together with the other information.
+   * @param message An additional message to be written into the log, together with the other information.
    * @param logLevel The Loglevel, the message should have. Default is <code>InfoLevel</code>.
    * @param endTime Manually set the timestamp of the end. By default it is NOW.
    */
   def finished(from: AnyRef,
                startMarker: StartMarker,
-               message: String = "",
-               logLevel: LogLevel = InfoLevel,
+               message: => String = "",
+               logLevel: LogLevel = DebugLevel,
                endTime: Instant = Instant.now(Clock.systemUTC))(implicit logging: Logging) = {
 
-    val endMarker =
-      LogMarkerToken(startMarker.startMarker.component, startMarker.startMarker.action, LoggingMarkers.finish)
+    val endMarker = startMarker.startMarker.asFinish
     val deltaToEnd = deltaToMarker(startMarker, endTime)
 
     if (TransactionId.metricsLog) {
       logging.emit(
-        logLevel,
+        InfoLevel,
         this,
         from,
-        createMessageWithMarker(message, LogMarker(endMarker, deltaToStart, Some(deltaToEnd))))
-    } else if (message.nonEmpty) {
+        createMessageWithMarker(
+          if (logLevel <= InfoLevel) message else "",
+          LogMarker(endMarker, deltaToStart, Some(deltaToEnd))))
+    } else {
       logging.emit(logLevel, this, from, message)
     }
 
-    if (TransactionId.metricsKamon) {
-      MetricEmitter.emitHistogramMetric(endMarker, deltaToEnd)
-    }
+    MetricEmitter.emitHistogramMetric(endMarker, deltaToEnd)
+
+    //tracing support
+    WhiskTracerProvider.tracer.finishSpan(this)
   }
 
   /**
@@ -134,14 +131,13 @@ case class TransactionId private (meta: TransactionMetadata) extends AnyVal {
    *
    * @param from Reference, where the method was called from.
    * @param startMarker <code>StartMarker</code> returned by a <code>starting</code> method.
-   * @param message An additional message that is written into the log, together with the other information.
+   * @param message An additional message to be written into the log, together with the other information.
    * @param logLevel The <code>LogLevel</code> the message should have. Default is <code>WarningLevel</code>.
    */
-  def failed(from: AnyRef, startMarker: StartMarker, message: String = "", logLevel: LogLevel = WarningLevel)(
+  def failed(from: AnyRef, startMarker: StartMarker, message: => String = "", logLevel: LogLevel = WarningLevel)(
     implicit logging: Logging) = {
 
-    val endMarker =
-      LogMarkerToken(startMarker.startMarker.component, startMarker.startMarker.action, LoggingMarkers.error)
+    val endMarker = startMarker.startMarker.asError
     val deltaToEnd = deltaToMarker(startMarker)
 
     if (TransactionId.metricsLog) {
@@ -150,14 +146,15 @@ case class TransactionId private (meta: TransactionMetadata) extends AnyVal {
         this,
         from,
         createMessageWithMarker(message, LogMarker(endMarker, deltaToStart, Some(deltaToEnd))))
-    } else if (message.nonEmpty) {
+    } else {
       logging.emit(logLevel, this, from, message)
     }
 
-    if (TransactionId.metricsKamon) {
-      MetricEmitter.emitHistogramMetric(endMarker, deltaToEnd)
-      MetricEmitter.emitCounterMetric(endMarker)
-    }
+    MetricEmitter.emitHistogramMetric(endMarker, deltaToEnd)
+    MetricEmitter.emitCounterMetric(endMarker)
+
+    //tracing support
+    WhiskTracerProvider.tracer.error(this)
   }
 
   /**
@@ -197,56 +194,57 @@ case class StartMarker(val start: Instant, startMarker: LogMarkerToken)
  * @param id the transaction identifier; it is positive for client requests,
  *           negative for system operation and zero when originator is not known
  * @param start the timestamp when the request processing commenced
+ * @param extraLogging enables logging, if set to true
  */
-protected case class TransactionMetadata(val id: Long, val start: Instant)
+protected case class TransactionMetadata(val id: String, val start: Instant, val extraLogging: Boolean = false)
 
 object TransactionId {
 
   // get the metric parameters directly from the environment since WhiskConfig can not be instantiated here
   val metricsKamon: Boolean = sys.env.get("METRICS_KAMON").getOrElse("False").toBoolean
+  val metricsKamonTags: Boolean = sys.env.get("METRICS_KAMON_TAGS").getOrElse("False").toBoolean
   val metricsLog: Boolean = sys.env.get("METRICS_LOG").getOrElse("True").toBoolean
 
-  val unknown = TransactionId(0)
-  val testing = TransactionId(-1) // Common id for for unit testing
-  val invoker = TransactionId(-100) // Invoker startup/shutdown or GC activity
-  val invokerWarmup = TransactionId(-101) // Invoker warmup thread that makes stem-cell containers
-  val invokerNanny = TransactionId(-102) // Invoker nanny thread
-  val dispatcher = TransactionId(-110) // Kafka message dispatcher
-  val loadbalancer = TransactionId(-120) // Loadbalancer thread
-  val invokerHealth = TransactionId(-121) // Invoker supervision
-  val controller = TransactionId(-130) // Controller startup
-  val dbBatcher = TransactionId(-140) // Database batcher
+  val generatorConfig = loadConfigOrThrow[TransactionGeneratorConfig](ConfigKeys.transactions)
 
-  def apply(tid: BigDecimal): TransactionId = {
-    Try {
-      val now = Instant.now(Clock.systemUTC())
-      TransactionId(TransactionMetadata(tid.toLong, now))
-    } getOrElse unknown
+  val systemPrefix = "sid_"
+
+  val unknown = TransactionId(systemPrefix + "unknown")
+  val testing = TransactionId(systemPrefix + "testing") // Common id for for unit testing
+  val invoker = TransactionId(systemPrefix + "invoker") // Invoker startup/shutdown or GC activity
+  val invokerWarmup = TransactionId(systemPrefix + "invokerWarmup") // Invoker warmup thread that makes stem-cell containers
+  val invokerNanny = TransactionId(systemPrefix + "invokerNanny") // Invoker nanny thread
+  val dispatcher = TransactionId(systemPrefix + "dispatcher") // Kafka message dispatcher
+  val loadbalancer = TransactionId(systemPrefix + "loadbalancer") // Loadbalancer thread
+  val invokerHealth = TransactionId(systemPrefix + "invokerHealth") // Invoker supervision
+  val controller = TransactionId(systemPrefix + "controller") // Controller startup
+  val dbBatcher = TransactionId(systemPrefix + "dbBatcher") // Database batcher
+
+  def apply(tid: String, extraLogging: Boolean = false): TransactionId = {
+    val now = Instant.now(Clock.systemUTC())
+    TransactionId(TransactionMetadata(tid, now, extraLogging))
   }
 
   implicit val serdes = new RootJsonFormat[TransactionId] {
-    def write(t: TransactionId) = JsArray(JsNumber(t.meta.id), JsNumber(t.meta.start.toEpochMilli))
+    def write(t: TransactionId) = {
+      if (t.meta.extraLogging)
+        JsArray(JsString(t.meta.id), JsNumber(t.meta.start.toEpochMilli), JsBoolean(t.meta.extraLogging))
+      else
+        JsArray(JsString(t.meta.id), JsNumber(t.meta.start.toEpochMilli))
+    }
 
     def read(value: JsValue) =
       Try {
         value match {
-          case JsArray(Vector(JsNumber(id), JsNumber(start))) =>
-            TransactionId(TransactionMetadata(id.longValue, Instant.ofEpochMilli(start.longValue)))
+          case JsArray(Vector(JsString(id), JsNumber(start))) =>
+            TransactionId(TransactionMetadata(id, Instant.ofEpochMilli(start.longValue), false))
+          case JsArray(Vector(JsString(id), JsNumber(start), JsBoolean(extraLogging))) =>
+            TransactionId(TransactionMetadata(id, Instant.ofEpochMilli(start.longValue), extraLogging))
         }
       } getOrElse unknown
   }
 }
 
-/**
- * A thread-safe transaction counter.
- */
-trait TransactionCounter {
-  val numberOfInstances: Int
-  val instanceOrdinal: Int
-
-  private lazy val cnt = new AtomicInteger(numberOfInstances + instanceOrdinal)
-
-  def transid(): TransactionId = {
-    TransactionId(cnt.addAndGet(numberOfInstances))
-  }
+case class TransactionGeneratorConfig(header: String) {
+  val lowerCaseHeader = header.toLowerCase //to cache the lowercase version of the header name
 }

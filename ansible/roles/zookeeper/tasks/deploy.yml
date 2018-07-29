@@ -1,8 +1,12 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more contributor
+# license agreements; and to You under the Apache License, Version 2.0.
 ---
 # This role will install Kafka with Zookeeper in group 'kafka' in the environment inventory
 
 - name: "pull the zookeeper:{{ zookeeper.version }} image"
   shell: "docker pull zookeeper:{{ zookeeper.version }}"
+  register: result
+  until: (result.rc == 0)
   retries: "{{ docker.pull.retries }}"
   delay: "{{ docker.pull.delay }}"
 

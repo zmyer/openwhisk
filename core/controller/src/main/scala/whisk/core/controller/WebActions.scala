@@ -21,7 +21,6 @@ import java.util.Base64
 
 import scala.concurrent.Future
 import scala.util.{Failure, Success, Try}
-
 import akka.http.scaladsl.model.HttpEntity.Empty
 import akka.http.scaladsl.server.Directives
 import akka.http.scaladsl.model.HttpMethod
@@ -36,7 +35,6 @@ import akka.http.scaladsl.model.headers._
 import akka.http.scaladsl.model.Uri.Query
 import akka.http.scaladsl.model.HttpEntity
 import akka.http.scaladsl.server.Route
-import akka.http.scaladsl.marshallers.sprayjson.SprayJsonSupport._
 import akka.http.scaladsl.model.headers.`Content-Type`
 import akka.http.scaladsl.model.headers.`Timeout-Access`
 import akka.http.scaladsl.model.ContentType
@@ -45,20 +43,20 @@ import akka.http.scaladsl.model.FormData
 import akka.http.scaladsl.model.HttpMethods.{DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT}
 import akka.http.scaladsl.model.HttpCharsets
 import akka.http.scaladsl.model.HttpResponse
-
 import spray.json._
 import spray.json.DefaultJsonProtocol._
-
 import WhiskWebActionsApi.MediaExtension
 import RestApiCommons.{jsonPrettyResponsePrinter => jsonPrettyPrinter}
-
 import whisk.common.TransactionId
 import whisk.core.controller.actions.PostActionActivation
 import whisk.core.database._
 import whisk.core.entity._
 import whisk.core.entity.types._
+import whisk.core.loadBalancer.LoadBalancerException
 import whisk.http.ErrorResponse.terminate
 import whisk.http.Messages
+import whisk.http.LenientSprayJsonSupport._
+import whisk.spi.SpiLoader
 import whisk.utils.JsHelpers._
 
 protected[controller] sealed class WebApiDirectives(prefix: String = "__ow_") {
@@ -91,7 +89,7 @@ private case class Context(propertyMap: WebApiDirectives,
 
   // returns true iff the attached query and body parameters contain a property
   // that conflicts with the given reserved parameters
-  def overrides(reservedParams: Set[String]): Set[String] = {
+  def overrides(reservedParams: Set[String]): Boolean = {
     val queryParams = queryAsMap.keySet
     val bodyParams = body
       .map {
@@ -100,7 +98,7 @@ private case class Context(propertyMap: WebApiDirectives,
       }
       .getOrElse(Set.empty)
 
-    (queryParams ++ bodyParams) intersect reservedParams
+    (queryParams ++ bodyParams).forall(key => !reservedParams.contains(key))
   }
 
   // attach the body to the Context
@@ -116,7 +114,7 @@ private case class Context(propertyMap: WebApiDirectives,
         .toMap
         .toJson,
       propertyMap.path -> path.toJson) ++
-      user.map(u => propertyMap.namespace -> u.namespace.asString.toJson)
+      user.map(u => propertyMap.namespace -> u.namespace.name.asString.toJson)
   }
 
   def toActionArgument(user: Option[Identity], boxQueryAndBody: Boolean): Map[String, JsValue] = {
@@ -129,11 +127,11 @@ private case class Context(propertyMap: WebApiDirectives,
     // if the body is a json object, merge with query parameters
     // otherwise, this is an opaque body that will be nested under
     // __ow_body in the parameters sent to the action as an argument
-    val bodyParams = body match {
+    val bodyParams: Map[String, JsValue] = body match {
       case Some(JsObject(fields)) if !boxQueryAndBody => fields
       case Some(v)                                    => Map(propertyMap.body -> v)
       case None if !boxQueryAndBody                   => Map.empty
-      case _                                          => Map(propertyMap.body -> JsObject())
+      case _                                          => Map(propertyMap.body -> JsString.empty)
     }
 
     // precedence order is: query params -> body (last wins)
@@ -227,17 +225,20 @@ protected[core] object WhiskWebActionsApi extends Directives {
           }.toList
 
         case _ => throw new Throwable("Invalid header")
-      } getOrElse List()
+      } getOrElse List.empty
 
       val body = fields.get("body")
 
       val code = fields.get(rp.statusCode).map {
         case JsNumber(c) =>
-          // the following throws an exception if the code is
-          // not a whole number or a valid code
+          // the following throws an exception if the code is not a whole number or a valid code
           StatusCode.int2StatusCode(c.toIntExact)
+        case JsString(c) =>
+          // parse the string to an Int (not a BigInt) matching JsNumber case match above
+          // c.toInt could throw an exception if the string isn't an integer
+          StatusCode.int2StatusCode(c.toInt)
 
-        case _ => throw new Throwable("Illegal code")
+        case _ => throw new Throwable("Illegal status code")
       }
 
       body.collect {
@@ -287,7 +288,7 @@ protected[core] object WhiskWebActionsApi extends Directives {
     }
   }
 
-  private def isJsonFamily(mt: MediaType) = {
+  def isJsonFamily(mt: MediaType): Boolean = {
     mt == `application/json` || mt.value.endsWith("+json")
   }
 
@@ -360,6 +361,9 @@ trait WhiskWebActionsApi extends Directives with ValidateRequestSize with PostAc
 
   /** Store for identities. */
   protected val authStore: AuthStore
+
+  /** Configured authentication provider. */
+  protected val authenticationProvider = SpiLoader.get[AuthenticationDirectiveProvider]
 
   /** The prefix for web invokes e.g., /web. */
   private lazy val webRoutePrefix = {
@@ -458,7 +462,8 @@ trait WhiskWebActionsApi extends Directives with ValidateRequestSize with PostAc
    * This method is factored out to allow mock testing.
    */
   protected def getIdentity(namespace: EntityName)(implicit transid: TransactionId): Future[Identity] = {
-    Identity.get(authStore, namespace)
+
+    authenticationProvider.identityByNamespace(namespace)(transid, authStore)
   }
 
   private def handleMatch(namespaceSegment: String,
@@ -483,7 +488,14 @@ trait WhiskWebActionsApi extends Directives with ValidateRequestSize with PostAc
               provide(fullyQualifiedActionName(actionName)) { fullActionName =>
                 onComplete(verifyWebAction(fullActionName, onBehalfOf.isDefined)) {
                   case Success((actionOwnerIdentity, action)) =>
-                    if (!action.annotations.asBool("web-custom-options").exists(identity)) {
+                    var requiredAuthOk =
+                      requiredWhiskAuthSuccessful(action.annotations, context.headers).getOrElse(true)
+                    if (!requiredAuthOk) {
+                      logging.debug(
+                        this,
+                        "web action with require-whisk-auth was invoked without a matching x-require-whisk-auth header value")
+                      terminate(Unauthorized)
+                    } else if (!action.annotations.getAs[Boolean]("web-custom-options").exists(identity)) {
                       respondWithHeaders(defaultCorsResponse(context.headers)) {
                         if (context.method == OPTIONS) {
                           complete(OK, HttpEntity.Empty)
@@ -559,12 +571,12 @@ trait WhiskWebActionsApi extends Directives with ValidateRequestSize with PostAc
       processRequest(actionOwnerIdentity, action, extension, onBehalfOf, context.withBody(body), isRawHttpAction)
     }
 
-    provide(action.annotations.asBool("raw-http").exists(identity)) { isRawHttpAction =>
+    provide(action.annotations.getAs[Boolean]("raw-http").exists(identity)) { isRawHttpAction =>
       httpEntity match {
         case Empty =>
           process(None, isRawHttpAction)
 
-        case HttpEntity.Strict(ContentTypes.`application/json`, json) if !isRawHttpAction =>
+        case HttpEntity.Strict(ct, json) if WhiskWebActionsApi.isJsonFamily(ct.mediaType) && !isRawHttpAction =>
           if (json.nonEmpty) {
             entity(as[JsValue]) { body =>
               process(Some(body), isRawHttpAction)
@@ -612,8 +624,7 @@ trait WhiskWebActionsApi extends Directives with ValidateRequestSize with PostAc
       // since these are system properties, the action should not define them, and if it does,
       // they will be overwritten
       if (isRawHttpAction || context
-            .overrides(webApiDirectives.reservedProperties ++ action.immutableParameters)
-            .isEmpty) {
+            .overrides(webApiDirectives.reservedProperties ++ action.immutableParameters)) {
         val content = context.toActionArgument(onBehalfOf, isRawHttpAction)
         invokeAction(actionOwnerIdentity, action, Some(JsObject(content)), maxWaitForWebActionResult, cause = None)
       } else {
@@ -658,10 +669,14 @@ trait WhiskWebActionsApi extends Directives with ValidateRequestSize with PostAc
       case Success(Left(activationId)) =>
         // blocking invoke which got queued instead
         // this should not happen, instead it should be a blocking invoke timeout
-        logging.info(this, "activation waiting period expired")
+        logging.debug(this, "activation waiting period expired")
         terminate(Accepted, Messages.responseNotReady)
 
       case Failure(t: RejectRequest) => terminate(t.code, t.message)
+
+      case Failure(t: LoadBalancerException) =>
+        logging.error(this, s"failed in loadbalancer: $t")
+        terminate(ServiceUnavailable)
 
       case Failure(t) =>
         logging.error(this, s"exception in completeRequest: $t")
@@ -680,10 +695,10 @@ trait WhiskWebActionsApi extends Directives with ValidateRequestSize with PostAc
         // if the package lookup fails or the package doesn't conform to expected invariants,
         // fail the request with BadRequest so as not to leak information about the existence
         // of packages that are otherwise private
-        logging.info(this, s"package which does not exist")
+        logging.debug(this, s"package which does not exist")
         Future.failed(RejectRequest(NotFound))
       case _: NoSuchElementException =>
-        logging.warn(this, s"'$pkg' is a binding")
+        logging.debug(this, s"'$pkg' is a binding")
         Future.failed(RejectRequest(NotFound))
     }
   }
@@ -720,18 +735,19 @@ trait WhiskWebActionsApi extends Directives with ValidateRequestSize with PostAc
   private def confirmExportedAction(actionLookup: Future[WhiskActionMetaData], authenticated: Boolean)(
     implicit transid: TransactionId): Future[WhiskActionMetaData] = {
     actionLookup flatMap { action =>
-      val requiresAuthenticatedUser = action.annotations.asBool("require-whisk-auth").exists(identity)
-      val isExported = action.annotations.asBool("web-export").exists(identity)
+      val requiresAuthenticatedUser =
+        action.annotations.getAs[Boolean](WhiskAction.requireWhiskAuthAnnotation).exists(identity)
+      val isExported = action.annotations.getAs[Boolean]("web-export").exists(identity)
 
       if ((isExported && requiresAuthenticatedUser && authenticated) ||
           (isExported && !requiresAuthenticatedUser)) {
-        logging.info(this, s"${action.fullyQualifiedName(true)} is exported")
+        logging.debug(this, s"${action.fullyQualifiedName(true)} is exported")
         Future.successful(action)
       } else if (!isExported) {
-        logging.info(this, s"${action.fullyQualifiedName(true)} not exported")
+        logging.debug(this, s"${action.fullyQualifiedName(true)} not exported")
         Future.failed(RejectRequest(NotFound))
       } else {
-        logging.info(this, s"${action.fullyQualifiedName(true)} requires authentication")
+        logging.debug(this, s"${action.fullyQualifiedName(true)} requires authentication")
         Future.failed(RejectRequest(Unauthorized))
       }
     }
@@ -750,6 +766,34 @@ trait WhiskWebActionsApi extends Directives with ValidateRequestSize with PostAc
         .orElse(responseType.defaultProjection)
     } else responseType.defaultProjection
 
-    projection.getOrElse(List())
+    projection.getOrElse(List.empty)
+  }
+
+  /**
+   * Check if "require-whisk-auth" authentication is needed, and if so, authenticate the request
+   * NOTE: Only number or string JSON "require-whisk-auth" annotation values are supported
+   *
+   * @param annotations - web action annotations
+   * @param reqHeaders - web action invocation request headers
+   * @return Option[Boolean]
+   *         None if annotations does not include require-whisk-auth (i.e. auth test not needed)
+   *         Some(true) if annotations includes require-whisk-auth and it's value matches the request header `X-Require-Whisk-Auth` value
+   *         Some(false) if annotations includes require-whisk-auth and the request does not include the header `X-Require-Whisk-Auth`
+   *         Some(false) if annotations includes require-whisk-auth and it's value deos not match the request header `X-Require-Whisk-Auth` value
+   */
+  private def requiredWhiskAuthSuccessful(annotations: Parameters, reqHeaders: Seq[HttpHeader]): Option[Boolean] = {
+    annotations
+      .get(WhiskAction.requireWhiskAuthAnnotation)
+      .flatMap {
+        case JsString(authStr) => Some(authStr)
+        case JsNumber(authNum) => Some(authNum.toString)
+        case _                 => None
+      }
+      .map { reqWhiskAuthAnnotationStr =>
+        reqHeaders
+          .find(_.is(WhiskAction.requireWhiskAuthHeader))
+          .map(_.value == reqWhiskAuthAnnotationStr)
+          .getOrElse(false) // false => when no x-require-whisk-auth header is present
+      }
   }
 }

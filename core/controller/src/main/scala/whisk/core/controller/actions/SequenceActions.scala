@@ -28,14 +28,12 @@ import scala.concurrent.duration._
 import scala.language.postfixOps
 import scala.util.Failure
 import scala.util.Success
-
 import akka.actor.ActorSystem
-
 import spray.json._
-
 import whisk.common.Logging
 import whisk.common.TransactionId
 import whisk.core.controller.WhiskServices
+import whisk.core.database.ActivationStore
 import whisk.core.entity._
 import whisk.core.entity.size.SizeInt
 import whisk.core.entity.types._
@@ -73,11 +71,11 @@ protected[actions] trait SequenceActions {
    *
    * @param user the user invoking the action
    * @param action the sequence action to be invoked
-   * @param payload the dynamic arguments for the activation
-   * @param blocking true iff this is a blocking invoke
-   * @param topmost true iff this is the topmost sequence invoked directly through the api (not indirectly through a sequence)
    * @param components the actions in the sequence
+   * @param payload the dynamic arguments for the activation
+   * @param waitForOutermostResponse some duration iff this is a blocking invoke
    * @param cause the id of the activation that caused this sequence (defined only for inner sequences and None for topmost sequences)
+   * @param topmost true iff this is the topmost sequence invoked directly through the api (not indirectly through a sequence)
    * @param atomicActionsCount the dynamic atomic action count observed so far since the start of invocation of the topmost sequence(0 if topmost)
    * @param transid a transaction id for logging
    * @return a future of type (ActivationId, Some(WhiskActivation), atomicActionsCount) if blocking; else (ActivationId, None, 0)
@@ -123,7 +121,7 @@ protected[actions] trait SequenceActions {
     if (topmost) { // need to deal with blocking and closing connection
       waitForOutermostResponse
         .map { timeout =>
-          logging.info(this, s"invoke sequence blocking topmost!")
+          logging.debug(this, s"invoke sequence blocking topmost!")
           futureSeqResult.withAlternativeAfterTimeout(
             timeout,
             Future.successful(Left(seqActivationId), atomicActionsCount))
@@ -162,26 +160,12 @@ protected[actions] trait SequenceActions {
         (Right(seqActivation), accounting.atomicActionCnt)
       }
       .andThen {
-        case Success((Right(seqActivation), _)) => storeSequenceActivation(seqActivation)
+        case Success((Right(seqActivation), _)) => activationStore.store(seqActivation)(transid, notifier = None)
 
         // This should never happen; in this case, there is no activation record created or stored:
         // should there be?
-        case Failure(t) => logging.error(this, s"Sequence activation failed: ${t.getMessage}")
+        case Failure(t) => logging.error(this, s"sequence activation failed: ${t.getMessage}")
       }
-  }
-
-  /**
-   * Stores sequence activation to database.
-   */
-  private def storeSequenceActivation(activation: WhiskActivation)(implicit transid: TransactionId): Unit = {
-    logging.info(this, s"recording activation '${activation.activationId}'")
-    WhiskActivation.put(activationStore, activation)(transid, notifier = None) onComplete {
-      case Success(id) => logging.info(this, s"recorded activation")
-      case Failure(t) =>
-        logging.error(
-          this,
-          s"failed to record activation ${activation.activationId} with error ${t.getLocalizedMessage}")
-    }
   }
 
   /**
@@ -210,7 +194,7 @@ protected[actions] trait SequenceActions {
 
     // create the whisk activation
     WhiskActivation(
-      namespace = user.namespace.toPath,
+      namespace = user.namespace.name.toPath,
       name = action.name,
       user.subject,
       activationId = activationId,
@@ -326,7 +310,7 @@ protected[actions] trait SequenceActions {
       val futureWhiskActivationTuple = action.toExecutableWhiskAction match {
         case None =>
           val SequenceExecMetaData(components) = action.exec
-          logging.info(this, s"sequence invoking an enclosed sequence $action")
+          logging.debug(this, s"sequence invoking an enclosed sequence $action")
           // call invokeSequence to invoke the inner sequence; this is a blocking activation by definition
           invokeSequence(
             user,
@@ -339,7 +323,7 @@ protected[actions] trait SequenceActions {
             accounting.atomicActionCnt)
         case Some(executable) =>
           // this is an invoke for an atomic action
-          logging.info(this, s"sequence invoking an enclosed atomic action $action")
+          logging.debug(this, s"sequence invoking an enclosed atomic action $action")
           val timeout = action.limits.timeout.duration + 1.minute
           invokeAction(user, action, inputPayload, waitForResponse = Some(timeout), cause) map {
             case res => (res, accounting.atomicActionCnt + 1)

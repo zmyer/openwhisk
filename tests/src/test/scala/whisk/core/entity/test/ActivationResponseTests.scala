@@ -22,8 +22,7 @@ import org.junit.runner.RunWith
 import org.scalatest.FlatSpec
 import org.scalatest.Matchers
 import org.scalatest.junit.JUnitRunner
-import spray.json.pimpAny
-import spray.json.pimpString
+import spray.json._
 import whisk.common.PrintStreamLogging
 import whisk.core.entity.ActivationResponse._
 import whisk.core.entity.size.SizeInt
@@ -59,7 +58,7 @@ class ActivationResponseTests extends FlatSpec with Matchers {
   }
 
   it should "interpret failed init that does not response" in {
-    Seq(ConnectionError(new Throwable()), NoResponseReceived(), Timeout())
+    Seq(ConnectionError(new Throwable()), NoResponseReceived(), Timeout(new Throwable()))
       .map(Left(_))
       .foreach { e =>
         val ar = processInitResponseContent(e, logger)
@@ -123,7 +122,7 @@ class ActivationResponseTests extends FlatSpec with Matchers {
   }
 
   it should "interpret failed run that does not response" in {
-    Seq(ConnectionError(new Throwable()), NoResponseReceived(), Timeout())
+    Seq(ConnectionError(new Throwable()), NoResponseReceived(), Timeout(new Throwable()))
       .map(Left(_))
       .foreach { e =>
         val ar = processRunResponseContent(e, logger)

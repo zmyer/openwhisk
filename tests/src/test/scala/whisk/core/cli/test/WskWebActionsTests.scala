@@ -22,25 +22,16 @@ import java.util.Base64
 
 import scala.util.Failure
 import scala.util.Try
-
 import org.junit.runner.RunWith
-import org.scalatest.BeforeAndAfterAll
 import org.scalatest.junit.JUnitRunner
-
 import com.jayway.restassured.RestAssured
 import com.jayway.restassured.response.Header
-
-import common.TestHelpers
-import common.TestUtils
-import common.WhiskProperties
-import common.BaseWsk
-import common.WskProps
-import common.WskTestHelpers
+import common._
+import common.rest.WskRestOperations
 import spray.json._
 import spray.json.DefaultJsonProtocol._
 import system.rest.RestUtil
 import whisk.common.PrintStreamLogging
-import whisk.common.SimpleExec
 import whisk.common.TransactionId
 import whisk.core.entity.Subject
 
@@ -48,12 +39,12 @@ import whisk.core.entity.Subject
  * Tests web actions.
  */
 @RunWith(classOf[JUnitRunner])
-abstract class WskWebActionsTests extends TestHelpers with WskTestHelpers with RestUtil with BeforeAndAfterAll {
+class WskWebActionsTests extends TestHelpers with WskTestHelpers with RestUtil with WskActorSystem {
   val MAX_URL_LENGTH = 8192 // 8K matching nginx default
 
-  val wsk: BaseWsk
   private implicit val wskprops = WskProps()
-  val namespace = wsk.namespace.whois()
+  val wsk: WskOperations = new WskRestOperations
+  lazy val namespace = wsk.namespace.whois()
 
   protected val testRoutePath: String = "/api/v1/web"
 
@@ -316,7 +307,7 @@ abstract class WskWebActionsTests extends TestHelpers with WskTestHelpers with R
 
   private val subdomainRegex = Seq.fill(WhiskProperties.getPartsInVanitySubdomain)("[a-zA-Z0-9]+").mkString("-")
 
-  private val (vanitySubdomain, vanityNamespace, makeTestSubject) = {
+  private lazy val (vanitySubdomain, vanityNamespace, makeTestSubject) = {
     if (namespace.matches(subdomainRegex)) {
       (namespace, namespace, false)
     } else {
@@ -325,7 +316,7 @@ abstract class WskWebActionsTests extends TestHelpers with WskTestHelpers with R
     }
   }
 
-  private val wskPropsForSubdomainTest = if (makeTestSubject) {
+  private lazy val wskPropsForSubdomainTest = if (makeTestSubject) {
     getAdditionalTestSubject(vanityNamespace) // create new subject for the test
   } else {
     WskProps()

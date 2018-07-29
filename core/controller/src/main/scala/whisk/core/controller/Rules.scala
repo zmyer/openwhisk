@@ -17,28 +17,23 @@
 
 package whisk.core.controller
 
-import scala.concurrent.Future
-import scala.util.Failure
-import scala.util.Success
-
 import akka.actor.ActorSystem
-import akka.http.scaladsl.model.StatusCodes._
 import akka.http.scaladsl.marshallers.sprayjson.SprayJsonSupport._
+import akka.http.scaladsl.model.StatusCodes._
 import akka.http.scaladsl.server.StandardRoute
-
+import akka.http.scaladsl.unmarshalling.Unmarshaller
 import spray.json.DeserializationException
-
 import whisk.common.TransactionId
-import whisk.core.database.DocumentConflictException
-import whisk.core.database.CacheChangeNotification
-import whisk.core.database.NoDocumentException
+import whisk.core.controller.RestApiCommons.{ListLimit, ListSkip}
+import whisk.core.database.{CacheChangeNotification, DocumentConflictException, NoDocumentException}
+import whisk.core.entitlement.{Collection, Privilege, ReferencedEntities}
 import whisk.core.entity._
 import whisk.core.entity.types.EntityStore
 import whisk.http.ErrorResponse.terminate
 import whisk.http.Messages._
-import whisk.core.entitlement.Collection
-import whisk.core.entitlement.Privilege
-import whisk.core.entitlement.ReferencedEntities
+
+import scala.concurrent.Future
+import scala.util.{Failure, Success}
 
 /** A trait implementing the rules API */
 trait WhiskRulesApi extends WhiskCollectionAPI with ReferencedEntities {
@@ -90,11 +85,31 @@ trait WhiskRulesApi extends WhiskCollectionAPI with ReferencedEntities {
         val request = content.resolve(entityName.namespace)
         onComplete(entitlementProvider.check(user, Privilege.READ, referencedEntities(request))) {
           case Success(_) =>
-            putEntity(WhiskRule, entityStore, entityName.toDocId, overwrite, update(request) _, () => {
-              create(request, entityName)
-            }, postProcess = Some { rule: WhiskRule =>
-              completeAsRuleResponse(rule, Status.ACTIVE)
-            })
+            putEntity(
+              WhiskRule,
+              entityStore,
+              entityName.toDocId,
+              overwrite,
+              update(request) _,
+              () => {
+                create(request, entityName)
+              },
+              postProcess = Some { rule: WhiskRule =>
+                if (overwrite == true) {
+                  val getRuleWithStatus = getTrigger(rule.trigger) map { trigger =>
+                    getStatus(trigger, FullyQualifiedEntityName(rule.namespace, rule.name))
+                  } map { status =>
+                    rule.withStatus(status)
+                  }
+
+                  onComplete(getRuleWithStatus) {
+                    case Success(r) => completeAsRuleResponse(rule, r.status)
+                    case Failure(t) => terminate(InternalServerError)
+                  }
+                } else {
+                  completeAsRuleResponse(rule, Status.ACTIVE)
+                }
+              })
           case Failure(f) =>
             handleEntitlementFailure(f)
         }
@@ -119,7 +134,7 @@ trait WhiskRulesApi extends WhiskCollectionAPI with ReferencedEntities {
     extractStatusRequest { requestedState =>
       val docid = entityName.toDocId
 
-      getEntity(WhiskRule, entityStore, docid, Some {
+      getEntity(WhiskRule.get(entityStore, docid), Some {
         rule: WhiskRule =>
           val ruleName = rule.fullyQualifiedName(false)
 
@@ -128,21 +143,21 @@ trait WhiskRulesApi extends WhiskCollectionAPI with ReferencedEntities {
           } flatMap {
             oldStatus =>
               if (requestedState != oldStatus) {
-                logging.info(this, s"[POST] rule state change initiated: ${oldStatus} -> $requestedState")
+                logging.debug(this, s"[POST] rule state change initiated: ${oldStatus} -> $requestedState")
                 Future successful requestedState
               } else {
-                logging.info(
+                logging.debug(
                   this,
                   s"[POST] rule state will not be changed, the requested state is the same as the old state: ${oldStatus} -> $requestedState")
                 Future failed { IgnoredRuleActivation(requestedState == oldStatus) }
               }
           } flatMap {
             case (newStatus) =>
-              logging.info(this, s"[POST] attempting to set rule state to: ${newStatus}")
+              logging.debug(this, s"[POST] attempting to set rule state to: ${newStatus}")
               WhiskTrigger.get(entityStore, rule.trigger.toDocId) flatMap { trigger =>
                 val newTrigger = trigger.removeRule(ruleName)
                 val triggerLink = ReducedRule(rule.action, newStatus)
-                WhiskTrigger.put(entityStore, newTrigger.addRule(ruleName, triggerLink))
+                WhiskTrigger.put(entityStore, newTrigger.addRule(ruleName, triggerLink), Some(trigger))
               }
           }
 
@@ -152,13 +167,13 @@ trait WhiskRulesApi extends WhiskCollectionAPI with ReferencedEntities {
             case Failure(t) =>
               t match {
                 case _: DocumentConflictException =>
-                  logging.info(this, s"[POST] rule update conflict")
+                  logging.debug(this, s"[POST] rule update conflict")
                   terminate(Conflict, conflictMessage)
                 case IgnoredRuleActivation(ok) =>
-                  logging.info(this, s"[POST] rule update ignored")
+                  logging.debug(this, s"[POST] rule update ignored")
                   if (ok) complete(OK) else terminate(Conflict)
                 case _: NoDocumentException =>
-                  logging.info(this, s"[POST] the trigger attached to the rule doesn't exist")
+                  logging.debug(this, s"[POST] the trigger attached to the rule doesn't exist")
                   terminate(NotFound, "Only rules with existing triggers can be activated")
                 case _: DeserializationException =>
                   logging.error(this, s"[POST] rule update failed: ${t.getMessage}")
@@ -193,7 +208,7 @@ trait WhiskRulesApi extends WhiskCollectionAPI with ReferencedEntities {
         } flatMap {
           case (status, triggerOpt) =>
             triggerOpt map { trigger =>
-              WhiskTrigger.put(entityStore, trigger.removeRule(ruleName)) map { _ =>
+              WhiskTrigger.put(entityStore, trigger.removeRule(ruleName), triggerOpt) map { _ =>
                 {}
               }
             } getOrElse Future.successful({})
@@ -215,9 +230,7 @@ trait WhiskRulesApi extends WhiskCollectionAPI with ReferencedEntities {
   override def fetch(user: Identity, entityName: FullyQualifiedEntityName, env: Option[Parameters])(
     implicit transid: TransactionId) = {
     getEntity(
-      WhiskRule,
-      entityStore,
-      entityName.toDocId,
+      WhiskRule.get(entityStore, entityName.toDocId),
       Some { rule: WhiskRule =>
         val getRuleWithStatus = getTrigger(rule.trigger) map { trigger =>
           getStatus(trigger, entityName)
@@ -239,17 +252,20 @@ trait WhiskRulesApi extends WhiskCollectionAPI with ReferencedEntities {
    * - 200 [] or [WhiskRule as JSON]
    * - 500 Internal Server Error
    */
-  override def list(user: Identity, namespace: EntityPath, excludePrivate: Boolean)(implicit transid: TransactionId) = {
-    // for consistency, all the collections should support the same list API
-    // but because supporting docs on actions is difficult, the API does not
-    // offer an option to fetch entities with full docs yet; see comment in
-    // Actions API for more.
-    val docs = false
-    parameter('skip ? 0, 'limit ? collection.listLimit, 'count ? false) { (skip, limit, count) =>
-      listEntities {
-        WhiskRule.listCollectionInNamespace(entityStore, namespace, skip, limit, docs) map { list =>
-          val rules = list.fold((js) => js, (rls) => rls.map(WhiskRule.serdes.write(_)))
-          FilterEntityList.filter(rules, excludePrivate)
+  override def list(user: Identity, namespace: EntityPath)(implicit transid: TransactionId) = {
+    parameter(
+      'skip.as[ListSkip] ? ListSkip(collection.defaultListSkip),
+      'limit.as[ListLimit] ? ListLimit(collection.defaultListLimit),
+      'count ? false) { (skip, limit, count) =>
+      if (!count) {
+        listEntities {
+          WhiskRule.listCollectionInNamespace(entityStore, namespace, skip.n, limit.n, includeDocs = true) map { list =>
+            list.fold((js) => js, (rls) => rls.map(WhiskRule.serdes.write(_)))
+          }
+        }
+      } else {
+        countEntities {
+          WhiskRule.countCollectionInNamespace(entityStore, namespace, skip.n)
         }
       }
     }
@@ -276,8 +292,8 @@ trait WhiskRulesApi extends WhiskCollectionAPI with ReferencedEntities {
             content.annotations getOrElse Parameters())
 
           val triggerLink = ReducedRule(actionName, Status.ACTIVE)
-          logging.info(this, s"about to put ${trigger.addRule(ruleName, triggerLink)}")
-          WhiskTrigger.put(entityStore, trigger.addRule(ruleName, triggerLink)) map { _ =>
+          logging.debug(this, s"about to put ${trigger.addRule(ruleName, triggerLink)}")
+          WhiskTrigger.put(entityStore, trigger.addRule(ruleName, triggerLink), old = None) map { _ =>
             rule
           }
       }
@@ -290,6 +306,7 @@ trait WhiskRulesApi extends WhiskCollectionAPI with ReferencedEntities {
     val oldTriggerName = rule.trigger
 
     getTrigger(oldTriggerName) flatMap { oldTriggerOpt =>
+      val status = getStatus(oldTriggerOpt, ruleName)
       val newTriggerEntity = content.trigger getOrElse rule.trigger
       val newTriggerName = newTriggerEntity
 
@@ -314,11 +331,11 @@ trait WhiskRulesApi extends WhiskCollectionAPI with ReferencedEntities {
             isDifferentTrigger <- content.trigger.filter(_ => newTriggerName != oldTriggerName)
             oldTrigger <- oldTriggerOpt
           } yield {
-            WhiskTrigger.put(entityStore, oldTrigger.removeRule(ruleName))
+            WhiskTrigger.put(entityStore, oldTrigger.removeRule(ruleName), oldTriggerOpt)
           }
 
-          val triggerLink = ReducedRule(actionName, Status.INACTIVE)
-          val update = WhiskTrigger.put(entityStore, newTrigger.addRule(ruleName, triggerLink))
+          val triggerLink = ReducedRule(actionName, status)
+          val update = WhiskTrigger.put(entityStore, newTrigger.addRule(ruleName, triggerLink), oldTriggerOpt)
           Future.sequence(Seq(deleteOldLink.getOrElse(Future.successful(true)), update)).map(_ => r)
       }
     }
@@ -376,7 +393,7 @@ trait WhiskRulesApi extends WhiskCollectionAPI with ReferencedEntities {
    * @return future that completes with references trigger and action if they exist
    */
   private def checkTriggerAndActionExist(trigger: FullyQualifiedEntityName, action: FullyQualifiedEntityName)(
-    implicit transid: TransactionId): Future[(WhiskTrigger, WhiskAction)] = {
+    implicit transid: TransactionId): Future[(WhiskTrigger, WhiskActionMetaData)] = {
 
     for {
       triggerExists <- WhiskTrigger.get(entityStore, trigger.toDocId) recoverWith {
@@ -391,7 +408,7 @@ trait WhiskRulesApi extends WhiskCollectionAPI with ReferencedEntities {
       }
 
       actionExists <- WhiskAction.resolveAction(entityStore, action) flatMap { resolvedName =>
-        WhiskAction.get(entityStore, resolvedName.toDocId)
+        WhiskActionMetaData.get(entityStore, resolvedName.toDocId)
       } recoverWith {
         case _: NoDocumentException =>
           Future.failed {
@@ -410,6 +427,13 @@ trait WhiskRulesApi extends WhiskCollectionAPI with ReferencedEntities {
     implicit val statusSerdes = Status.serdesRestricted
     entity(as[Status])
   }
+
+  /** Custom unmarshaller for query parameters "limit" for "list" operations. */
+  private implicit val stringToListLimit: Unmarshaller[String, ListLimit] = RestApiCommons.stringToListLimit(collection)
+
+  /** Custom unmarshaller for query parameters "skip" for "list" operations. */
+  private implicit val stringToListSkip: Unmarshaller[String, ListSkip] = RestApiCommons.stringToListSkip(collection)
+
 }
 
 private case class IgnoredRuleActivation(noop: Boolean) extends Throwable

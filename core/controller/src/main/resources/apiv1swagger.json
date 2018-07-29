@@ -60,74 +60,6 @@
                 }
             }
         },
-        "/namespaces/{namespace}": {
-            "get": {
-                "tags": [
-                    "Namespaces"
-                ],
-                "description": "Get all entities in a namespace",
-                "summary": "Get all entities in a namespace",
-                "operationId": "getAllEntitiesInNamespace",
-                "parameters": [
-                    {
-                        "name": "namespace",
-                        "in": "path",
-                        "description": "The namespace",
-                        "required": true,
-                        "type": "string"
-                    }
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "responses": {
-                    "200": {
-                        "description": "All entities",
-                        "schema": {
-                            "type": "object",
-                            "required": [
-                                "actions",
-                                "triggers",
-                                "rules",
-                                "packages"
-                            ],
-                            "properties": {
-                                "actions": {
-                                    "type": "array",
-                                    "items": {
-                                        "$ref": "#/definitions/EntityBrief"
-                                    }
-                                },
-                                "triggers": {
-                                    "type": "array",
-                                    "items": {
-                                        "$ref": "#/definitions/EntityBrief"
-                                    }
-                                },
-                                "rules": {
-                                    "type": "array",
-                                    "items": {
-                                        "$ref": "#/definitions/EntityBrief"
-                                    }
-                                },
-                                "packages": {
-                                    "type": "array",
-                                    "items": {
-                                        "$ref": "#/definitions/EntityBrief"
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    "401": {
-                        "$ref": "#/responses/UnauthorizedRequest"
-                    },
-                    "500": {
-                        "$ref": "#/responses/ServerError"
-                    }
-                }
-            }
-        },
         "/namespaces/{namespace}/actions": {
             "get": {
                 "tags": [
@@ -147,7 +79,7 @@
                     {
                         "name": "limit",
                         "in": "query",
-                        "description": "Number of entities to include in the result.",
+                        "description": "Number of entities to include in the result (0-200). The default limit is 30. A value of 0 sets the limit to the maximum.",
                         "required": false,
                         "type": "integer"
                     },
@@ -410,7 +342,6 @@
                         }
                     },
                     "202": {
-                        "description": "Activation request accepted",
                         "$ref": "#/responses/AcceptedActivation"
                     },
                     "401": {
@@ -453,7 +384,7 @@
                     {
                         "name": "limit",
                         "in": "query",
-                        "description": "Number of entities to include in the result.",
+                        "description": "Number of entities to include in the result (0-200). The default limit is 30. A value of 0 sets the limit to the maximum.",
                         "required": false,
                         "type": "integer"
                     },
@@ -715,7 +646,7 @@
                     {
                         "name": "limit",
                         "in": "query",
-                        "description": "Number of entities to include in the result.",
+                        "description": "Number of entities to include in the result (0-200). The default limit is 30. A value of 0 sets the limit to the maximum.",
                         "required": false,
                         "type": "integer"
                     },
@@ -941,6 +872,9 @@
                             "$ref": "#/definitions/ItemId"
                         }
                     },
+                    "204": {
+                        "$ref": "#/responses/NoActiveRules"
+                    },
                     "401": {
                         "$ref": "#/responses/UnauthorizedRequest"
                     },
@@ -982,7 +916,7 @@
                     {
                         "name": "limit",
                         "in": "query",
-                        "description": "Number of entities to include in the result.",
+                        "description": "Number of entities to include in the result (0-200). The default limit is 30. A value of 0 sets the limit to the maximum.",
                         "required": false,
                         "type": "integer"
                     },
@@ -1196,7 +1130,7 @@
                     {
                         "name": "limit",
                         "in": "query",
-                        "description": "Number of entities to include in the result.",
+                        "description": "Number of entities to include in the result (0-200). The default limit is 30. A value of 0 sets the limit to the maximum.",
                         "required": false,
                         "type": "integer"
                     },
@@ -1565,6 +1499,8 @@
                         "nodejs:8",
                         "python:2",
                         "python:3",
+                        "php:7.1",
+                        "php:7.2",
                         "swift:3.1.1",
                         "java",
                         "blackbox"
@@ -1718,6 +1654,10 @@
                 },
                 "limits": {
                     "$ref": "#/definitions/TriggerLimits"
+                },
+                "rules": {
+                    "type": "object",
+                    "description": "rules associated with the trigger"
                 }
             }
         },
@@ -2106,6 +2046,9 @@
             "schema": {
                 "$ref": "#/definitions/ErrorMessage"
             }
+        },
+        "NoActiveRules": {
+            "description": "Trigger has no active rules"
         }
     }
 }

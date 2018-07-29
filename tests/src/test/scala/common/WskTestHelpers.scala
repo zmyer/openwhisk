@@ -28,10 +28,45 @@ import scala.concurrent.duration.Duration
 import scala.concurrent.duration.DurationInt
 
 import spray.json._
+import spray.json.DefaultJsonProtocol._
 
 import TestUtils.RunResult
+import TestUtils.SUCCESS_EXIT
 import TestUtils.CONFLICT
 import akka.http.scaladsl.model.StatusCodes
+
+object FullyQualifiedNames {
+
+  /**
+   * Fully qualifies the name of an entity with its namespace.
+   * If the name already starts with the PATHSEP character, then
+   * it already is fully qualified. Otherwise (package name or
+   * basic entity name) it is prefixed with the namespace. The
+   * namespace is derived from the implicit whisk properties.
+   *
+   * @param name to fully qualify iff it is not already fully qualified
+   * @param wp whisk properties
+   * @return name if it is fully qualified else a name fully qualified for a namespace
+   */
+  def fqn(name: String)(implicit wp: WskProps) = {
+    val sep = "/" // Namespace.PATHSEP
+    if (name.startsWith(sep) || name.count(_ == sep(0)) == 2) name
+    else s"$sep${wp.namespace}$sep$name"
+  }
+
+  /**
+   * Resolves a namespace. If argument is defined, it takes precedence.
+   * else resolve to namespace in implicit WskProps.
+   *
+   * @param namespace an optional namespace
+   * @param wp whisk properties
+   * @return resolved namespace
+   */
+  def resolve(namespace: Option[String])(implicit wp: WskProps) = {
+    val sep = "/" // Namespace.PATHSEP
+    namespace getOrElse s"$sep${wp.namespace}"
+  }
+}
 
 /**
  * An arbitrary response of a whisk action. Includes the result as a JsObject as the
@@ -56,7 +91,7 @@ object ActivationResponse extends DefaultJsonProtocol {
  * @param start an Instant to save the start time of activation
  * @param end an Instant to save the end time of activation
  * @param duration a Long to save the duration of the activation
- * @param cases String to save the cause of failure if the activation fails
+ * @param cause String to save the cause of failure if the activation fails
  * @param annotations a list of JSON objects to save the annotations of the activation
  */
 case class ActivationResult(activationId: String,
@@ -68,15 +103,10 @@ case class ActivationResult(activationId: String,
                             cause: Option[String],
                             annotations: Option[List[JsObject]]) {
 
-  def getAnnotationValue(key: String): Option[JsValue] = {
-    Try {
-      val annotation = annotations.get.filter(x => x.getFields("key")(0) == JsString(key))
-      assert(annotation.size == 1) // only one annotation with this value
-      val value = annotation(0).getFields("value")
-      assert(value.size == 1)
-      value(0)
-    }.toOption
-  }
+  def getAnnotationValue(key: String): Option[JsValue] =
+    annotations
+      .flatMap(_.find(_.fields("key").convertTo[String] == key))
+      .map(_.fields("value"))
 }
 
 object ActivationResult extends DefaultJsonProtocol {
@@ -87,9 +117,9 @@ object ActivationResult extends DefaultJsonProtocol {
       Try {
         value match {
           case JsNumber(i) => Instant.ofEpochMilli(i.bigDecimal.longValue)
-          case _           => deserializationError("timetsamp malformed")
+          case _           => deserializationError("timestamp malformed")
         }
-      } getOrElse deserializationError("timetsamp malformed 2")
+      } getOrElse deserializationError("timestamp malformed 2")
   }
 
   implicit val serdes = new RootJsonFormat[ActivationResult] {
@@ -123,6 +153,12 @@ object ActivationResult extends DefaultJsonProtocol {
   }
 }
 
+/** The result of a rule-activation written into the trigger activation */
+case class RuleActivationResult(statusCode: Int, success: Boolean, activationId: String, action: String)
+object RuleActivationResult extends DefaultJsonProtocol {
+  implicit val serdes = jsonFormat4(RuleActivationResult.apply)
+}
+
 /**
  * Test fixture to ease cleaning of whisk entities created during testing.
  *
@@ -130,7 +166,7 @@ object ActivationResult extends DefaultJsonProtocol {
  * completed, will delete them all.
  */
 trait WskTestHelpers extends Matchers {
-  type Assets = ListBuffer[(BaseDeleteFromCollection, String, Boolean)]
+  type Assets = ListBuffer[(DeleteFromCollectionOperations, String, Boolean)]
 
   /**
    * Helper to register an entity to delete once a test completes.
@@ -139,7 +175,7 @@ trait WskTestHelpers extends Matchers {
    *
    */
   class AssetCleaner(assetsToDeleteAfterTest: Assets, wskprops: WskProps) {
-    def withCleaner[T <: BaseDeleteFromCollection](cli: T, name: String, confirmDelete: Boolean = true)(
+    def withCleaner[T <: DeleteFromCollectionOperations](cli: T, name: String, confirmDelete: Boolean = true)(
       cmd: (T, String) => RunResult): RunResult = {
       // sanitize (delete) if asset exists
       cli.sanitize(name)(wskprops)
@@ -154,7 +190,7 @@ trait WskTestHelpers extends Matchers {
    * list that is iterated at the end of the test so that these entities are deleted
    * (from most recently created to oldest).
    */
-  def withAssetCleaner(wskprops: WskProps)(test: (WskProps, AssetCleaner) => Any) = {
+  def withAssetCleaner[T](wskprops: WskProps)(test: (WskProps, AssetCleaner) => T): T = {
     // create new asset list to track what must be deleted after test completes
     val assetsToDeleteAfterTest = new Assets()
 
@@ -164,18 +200,23 @@ trait WskTestHelpers extends Matchers {
       case t: Throwable =>
         // log the exception that occurred in the test and rethrow it
         println(s"Exception occurred during test execution: $t")
+        t.printStackTrace()
         throw t
     } finally {
       // delete assets in reverse order so that was created last is deleted first
       val deletedAll = assetsToDeleteAfterTest.reverse map {
-        case ((cli, n, delete)) =>
+        case (cli, n, delete) =>
           n -> Try {
             cli match {
-              case _: BasePackage if delete =>
-                val rr = cli.delete(n)(wskprops)
+              case _: PackageOperations if delete =>
+                // sanitize ignores the exit code, so we can inspect the actual result and retry accordingly
+                val rr = cli.sanitize(n)(wskprops)
                 rr.exitCode match {
                   case CONFLICT | StatusCodes.Conflict.intValue =>
-                    whisk.utils.retry(cli.delete(n)(wskprops), 5, Some(1.second))
+                    whisk.utils.retry({
+                      println("package deletion conflict, view computation delay likely, retrying...")
+                      cli.delete(n)(wskprops)
+                    }, 5, Some(1.second))
                   case _ => rr
                 }
               case _ => if (delete) cli.delete(n)(wskprops) else cli.sanitize(n)(wskprops)
@@ -198,7 +239,7 @@ trait WskTestHelpers extends Matchers {
    * the activation to the post processor which then check for expected values.
    */
   def withActivation(
-    wsk: BaseActivation,
+    wsk: ActivationOperations,
     run: RunResult,
     initialWait: Duration = 1.second,
     pollPeriod: Duration = 1.second,
@@ -216,55 +257,25 @@ trait WskTestHelpers extends Matchers {
    * Polls activations until one matching id is found. If found, pass
    * the activation to the post processor which then check for expected values.
    */
-  def withActivation(wsk: BaseActivation,
+  def withActivation(wsk: ActivationOperations,
                      activationId: String,
                      initialWait: Duration,
                      pollPeriod: Duration,
                      totalWait: Duration)(check: ActivationResult => Unit)(implicit wskprops: WskProps): Unit = {
     val id = activationId
     val activation = wsk.waitForActivation(id, initialWait, pollPeriod, totalWait)
-    if (activation.isLeft) {
-      assert(false, s"error waiting for activation $id: ${activation.left.get}")
-    } else
-      try {
-        check(activation.right.get.convertTo[ActivationResult])
-      } catch {
-        case error: Throwable =>
-          println(s"check failed for activation $id: ${activation.right.get}")
-          throw error
-      }
+
+    activation match {
+      case Left(reason) => fail(s"error waiting for activation $id for $totalWait: $reason")
+      case Right(result) =>
+        withRethrowingPrint(s"check failed for activation $id: $result") {
+          check(result.convertTo[ActivationResult])
+        }
+    }
   }
-
-  /**
-   * Polls until it finds {@code N} activationIds from an entity. Asserts the count
-   * of the activationIds actually equal {@code N}. Takes a {@code since} parameter
-   * defining the oldest activationId to consider valid.
-   */
-  def withActivationsFromEntity(
-    wsk: BaseActivation,
-    entity: String,
-    N: Int = 1,
-    since: Option[Instant] = None,
-    pollPeriod: Duration = 1.second,
-    totalWait: Duration = 60.seconds)(check: Seq[ActivationResult] => Unit)(implicit wskprops: WskProps): Unit = {
-
-    val activationIds =
-      wsk.pollFor(N, Some(entity), since = since, retries = (totalWait / pollPeriod).toInt, pollPeriod = pollPeriod)
-    withClue(
-      s"expecting $N activations matching '$entity' name since $since but found ${activationIds.mkString(",")} instead") {
-      activationIds.length shouldBe N
-    }
-
-    val parsed = activationIds.map { id =>
-      wsk.parseJsonString(wsk.get(Some(id)).stdout).convertTo[ActivationResult]
-    }
-    try {
-      check(parsed)
-    } catch {
-      case error: Throwable =>
-        println(s"check failed for activations $activationIds: ${parsed}")
-        throw error
-    }
+  def withActivation(wsk: ActivationOperations, activationId: String)(check: ActivationResult => Unit)(
+    implicit wskprops: WskProps): Unit = {
+    withActivation(wsk, activationId, 1.second, 1.second, 60.seconds)(check)
   }
 
   /**
@@ -282,23 +293,46 @@ trait WskTestHelpers extends Matchers {
     }
   }
 
+  /**
+   * Prints the given information iff the inner test fails. Rethrows the tests exception to get a meaningful
+   * stacktrace.
+   *
+   * @param information additional information to print
+   * @param test test to run
+   */
+  def withRethrowingPrint(information: String)(test: => Unit): Unit = {
+    try test
+    catch {
+      case error: Throwable =>
+        println(information)
+        throw error
+    }
+  }
+
+  def getAdditionalTestSubject(newUser: String): WskProps = {
+    import WskAdmin.wskadmin
+    WskProps(namespace = newUser, authKey = wskadmin.cli(Seq("user", "create", newUser)).stdout.trim)
+  }
+
+  def disposeAdditionalTestSubject(subject: String, expectedExitCode: Int = SUCCESS_EXIT): Unit = {
+    import WskAdmin.wskadmin
+    withClue(s"failed to delete temporary subject $subject") {
+      wskadmin.cli(Seq("user", "delete", subject), expectedExitCode).stdout should include("Subject deleted")
+    }
+  }
+
+  /** Appends the current timestamp in ms. */
+  def withTimestamp(text: String) = s"${text}-${System.currentTimeMillis}"
+
+  /** Strips the first line if it ends in a new line as is common for CLI output. */
   def removeCLIHeader(response: String): String = {
     if (response.contains("\n")) response.substring(response.indexOf("\n")) else response
   }
 
+  // using annotation will cause compile errors because we use -Xfatal-warnings
+  // @deprecated(message = "use wsk.parseJsonString instead", since = "pr #3741")
   def getJSONFromResponse(response: String, isCli: Boolean = false): JsObject = {
+    println("!!! WARNING: method is deprecated; use wsk.parseJsonString instead")
     if (isCli) removeCLIHeader(response).parseJson.asJsObject else response.parseJson.asJsObject
-  }
-
-  def getAdditionalTestSubject(newUser: String): WskProps = {
-    val wskadmin = new RunWskAdminCmd {}
-    WskProps(namespace = newUser, authKey = wskadmin.cli(Seq("user", "create", newUser)).stdout.trim)
-  }
-
-  def disposeAdditionalTestSubject(subject: String): Unit = {
-    val wskadmin = new RunWskAdminCmd {}
-    withClue(s"failed to delete temporary subject $subject") {
-      wskadmin.cli(Seq("user", "delete", subject)).stdout should include("Subject deleted")
-    }
   }
 }

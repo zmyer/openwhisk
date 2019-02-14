@@ -81,16 +81,12 @@ directory before deploying OpenWhisk.
 The following step must be executed once per development environment.
 It will generate the `hosts` configuration file based on your environment settings.
 
-```
-ansible-playbook -i environments/<environment> setup.yml
-```
-
 The default configuration does not run multiple instances of core components (e.g., controller, invoker, kafka).
-You may elect to enable high-availability (HA) mode by passing tne ansible option `-e mode=HA` when executing this playbook.
-This will configure your deployment with multiple instances (e.g., two kafka instancess, and two invokers).
+You may elect to enable high-availability (HA) mode by passing tne Ansible option `-e mode=HA` when executing this playbook.
+This will configure your deployment with multiple instances (e.g., two Kafka instances, and two invokers).
 
 In addition to the host file generation, you need to configure the database for your deployment. This is done
-by creating a file `ansible/db_local.ini` to provide the following properties.
+by modifying the file `ansible/db_local.ini` to provide the following properties.
 
 ```bash
 [db_creds]
@@ -102,7 +98,7 @@ db_host=
 db_port=
 ```
 
-This file is generated automatically if you are using an ephermeral CouchDB instance. Otherwise, you must create it explicitly.
+This file is generated automatically for an ephemeral CouchDB instance during `setup.yml`. If you want to use Cloudant, you have to modify the file.
 For convenience, you can use shell environment variables that are read by the playbook to generate the required `db_local.ini` file as shown below.
 
 ```
@@ -113,7 +109,7 @@ export OW_DB_PROTOCOL=<your couchdb protocol>
 export OW_DB_HOST=<your couchdb host>
 export OW_DB_PORT=<your couchdb port>
 
-ansible-playbook -i environments/<environment> couchdb.yml --tags ini
+ansible-playbook -i environments/<environment> setup.yml
 ```
 
 Alternatively, if you want to use Cloudant as your datastore:
@@ -126,7 +122,7 @@ export OW_DB_PROTOCOL=https
 export OW_DB_HOST=<your cloudant user>.cloudant.com
 export OW_DB_PORT=443
 
-ansible-playbook -i environments/<environment> couchdb.yml --tags ini
+ansible-playbook -i environments/<environment> setup.yml
 ```
 
 #### Install Prerequisites
@@ -150,27 +146,31 @@ cd ansible
 ansible-playbook -i environments/<environment> couchdb.yml
 ansible-playbook -i environments/<environment> initdb.yml
 ansible-playbook -i environments/<environment> wipe.yml
-ansible-playbook -i environments/<environment> apigateway.yml
 ansible-playbook -i environments/<environment> openwhisk.yml
+
+# installs a catalog of public packages and actions
 ansible-playbook -i environments/<environment> postdeploy.yml
+
+# to use the API gateway
+ansible-playbook -i environments/<environment> apigateway.yml
+ansible-playbook -i environments/<environment> routemgmt.yml
 ```
 
-You need to run `initdb.yml` **every time** you do a fresh deploy CouchDB to initialize the subjects database.
-The playbooks `wipe.yml` and `postdeploy.yml` should be run on a fresh deployment only, otherwise all transient
-data that include actions and activations are lost.
+- You need to run `initdb.yml` **every time** you do a fresh deploy CouchDB to initialize the subjects database.
+- The `wipe.yml` playbook should be run on a fresh deployment only, otherwise actions and activations will be lost.
+- Run `postdeploy.yml` after deployment to install a catalog of useful packages.
+- To use the API Gateway, you'll need to run `apigateway.yml` and `routemgmt.yml`.
+- Use `ansible-playbook -i environments/<environment> openwhisk.yml` to avoid wiping the data store. This is useful to start OpenWhisk after restarting your Operating System.
 
 #### Limitation
 
-You can not run multiple CouchDB nodes on a single machine.
-This limitation comes from Erlang EPMD.
-When CouchDB forms a cluster, it counts on EPMD to find other nodes.
-If we want to run multiple nodes on a single machine, we must differentiate EPMD port(`4369`) for each nodes. But if this port is different on each nodes, they cannot find each other.
-So if you want to deploy multiple CouchDB nodes, all nodes should be placed on different machines respectively.
+You cannot run multiple CouchDB nodes on a single machine. This limitation comes from Erlang EPMD which CouchDB relies on to find other nodes.
+To deploy multiple CouchDB nodes, they should be placed on different machines respectively otherwise their ports will clash.
 
 
 ### Deploying Using Cloudant
--   Make sure your `db_local.ini` file is set up for Cloudant. See [Setup](#setup)
--   Then execute
+-   Make sure your `db_local.ini` file is set up for Cloudant. See [Setup](#setup).
+-   Then execute:
 
 ```
 cd <openwhisk_home>
@@ -180,16 +180,21 @@ ansible-playbook -i environments/<environment> initdb.yml
 ansible-playbook -i environments/<environment> wipe.yml
 ansible-playbook -i environments/<environment> apigateway.yml
 ansible-playbook -i environments/<environment> openwhisk.yml
+
+# installs a catalog of public packages and actions
 ansible-playbook -i environments/<environment> postdeploy.yml
+
+# to use the API gateway
+ansible-playbook -i environments/<environment> apigateway.yml
+ansible-playbook -i environments/<environment> routemgmt.yml
 ```
 
-You need to run `initdb` on Cloudant **only once** per Cloudant database to initialize the subjects database.
-The `initdb.yml` playbook will only initialize your database if it is not initialized already, else it will skip initialization steps.
-
-The playbooks `wipe.yml` and `postdeploy.yml` should be run on a fresh deployment only, otherwise all transient
-data that include actions and activations are lost.
-
-Use `ansible-playbook -i environments/<environment> openwhisk.yml` to avoid wiping the data store. This is useful to start OpenWhisk after restarting your Operating System.
+- You need to run `initdb` on Cloudant **only once** per Cloudant database to initialize the subjects database.
+- The `initdb.yml` playbook will only initialize your database if it is not initialized already, else it will skip initialization steps.
+- The `wipe.yml` playbook should be run on a fresh deployment only, otherwise actions and activations will be lost.
+- Run `postdeploy.yml` after deployment to install a catalog of useful packages.
+- To use the API Gateway, you'll need to run `apigateway.yml` and `routemgmt.yml`.
+- Use `ansible-playbook -i environments/<environment> openwhisk.yml` to avoid wiping the data store. This is useful to start OpenWhisk after restarting your Operating System.
 
 ### Configuring the installation of `wsk` CLI
 There are two installation modes to install `wsk` CLI: remote and local.
@@ -215,7 +220,7 @@ cd "$OPENWHISK_HOME/../incubator-openwhisk-cli"
 ```
 
 The binaries are generated and put into a tarball in the folder
-`../incubator-openwhisk-cli/release`.  Then, use the following ansible command
+`../incubator-openwhisk-cli/release`.  Then, use the following Ansible command
 to (re-)configure the CLI installation:
 
 ```
@@ -275,6 +280,17 @@ This is usually not necessary, however in case you want to uninstall all prereqs
 ansible-playbook -i environments/<environment> prereq.yml -e mode=clean
 ```
 
+### Lean Setup
+To have a lean setup (no Kafka, Zookeeper and no Invokers as separate entities):
+
+At [Deploying Using CouchDB](ansible/README.md#deploying-using-cloudant) step, replace:
+```
+ansible-playbook -i environments/<environment> openwhisk.yml
+```
+by:
+```
+ansible-playbook -i environments/<environment> openwhisk.yml -e lean=true
+```
 
 ### Troubleshooting
 Some of the more common problems and their solution are listed here.
@@ -359,3 +375,6 @@ limits:
 - The `limits.concurrentInvocations` represents the maximum concurrent invocations allowed per namespace.
 - The `limits.firesPerMinute` represents the allowed namespace trigger firings per minute.
 - The `limits.sequenceMaxLength` represents the maximum length of a sequence action.
+
+#### Set the timezone for containers
+The default timezone for all system containers is UTC. The timezone may differ from your servers which could make it difficult to inspect logs. The timezone is configured globally in [group_vars/all](./group_vars/all#L280) or by passing an extra variable `-e docker_timezone=xxx` when you run an ansible-playbook.

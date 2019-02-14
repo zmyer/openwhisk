@@ -35,13 +35,15 @@ import scala.util.{Failure, Success}
 import org.apache.commons.lang3.StringUtils
 import org.scalatest.{FlatSpec, Matchers}
 import akka.actor.ActorSystem
+
 import scala.concurrent.ExecutionContext
 import spray.json._
 import common.StreamLogging
-import whisk.common.Logging
-import whisk.common.TransactionId
-import whisk.core.entity.Exec
+import org.apache.openwhisk.common.Logging
+import org.apache.openwhisk.common.TransactionId
+import org.apache.openwhisk.core.entity.Exec
 import common.WhiskProperties
+import org.apache.openwhisk.core.containerpool.Container
 
 /**
  * For testing convenience, this interface abstracts away the REST calls to a
@@ -64,17 +66,30 @@ trait ActionProxyContainerTestUtils extends FlatSpec with Matchers with StreamLo
         "binary" -> JsBoolean(Exec.isBinaryCode(code))))
 
   def runPayload(args: JsValue, other: Option[JsObject] = None): JsObject =
-    JsObject(Map("value" -> args) ++ (other map { _.fields } getOrElse Map()))
+    JsObject(Map("value" -> args) ++ (other map { _.fields } getOrElse Map.empty))
 
   def checkStreams(out: String,
                    err: String,
                    additionalCheck: (String, String) => Unit,
-                   sentinelCount: Int = 1): Unit = {
+                   sentinelCount: Int = 1,
+                   concurrent: Boolean = false): Unit = {
     withClue("expected number of stdout sentinels") {
       sentinelCount shouldBe StringUtils.countMatches(out, sentinel)
     }
+    //sentinels should be all together
+    if (concurrent) {
+      withClue("expected grouping of stdout sentinels") {
+        out should include((1 to sentinelCount).map(_ => sentinel + "\n").mkString)
+      }
+    }
     withClue("expected number of stderr sentinels") {
       sentinelCount shouldBe StringUtils.countMatches(err, sentinel)
+    }
+    //sentinels should be all together
+    if (concurrent) {
+      withClue("expected grouping of stderr sentinels") {
+        err should include((1 to sentinelCount).map(_ => sentinel + "\n").mkString)
+      }
     }
 
     val (o, e) = (filterSentinel(out), filterSentinel(err))
@@ -167,8 +182,8 @@ object ActionContainer {
     Await.result(proc(docker(cmd)), t)
   }
 
-  // Filters out the sentinel markers inserted by the container (see relevant private code in Invoker.scala)
-  val sentinel = "XXX_THE_END_OF_A_WHISK_ACTIVATION_XXX"
+  // Filters out the sentinel markers inserted by the container (see relevant private code in Invoker)
+  val sentinel = Container.ACTIVATION_LOG_SENTINEL
   def filterSentinel(str: String): String = str.replaceAll(sentinel, "").trim
 
   def withContainer(imageName: String, environment: Map[String, String] = Map.empty)(
@@ -234,16 +249,16 @@ object ActionContainer {
 
     implicit val transid = TransactionId.testing
 
-    whisk.core.containerpool.AkkaContainerClient.post(host, port, endPoint, content, 30.seconds)
+    org.apache.openwhisk.core.containerpool.AkkaContainerClient.post(host, port, endPoint, content, 30.seconds)
   }
   private def concurrentSyncPost(host: String, port: Int, endPoint: String, contents: Seq[JsValue])(
     implicit logging: Logging,
-    ec: ExecutionContext,
     as: ActorSystem): Seq[(Int, Option[JsObject])] = {
 
     implicit val transid = TransactionId.testing
 
-    whisk.core.containerpool.AkkaContainerClient.concurrentPost(host, port, endPoint, contents, 30.seconds)
+    org.apache.openwhisk.core.containerpool.AkkaContainerClient
+      .concurrentPost(host, port, endPoint, contents, 30.seconds)
   }
 
 }

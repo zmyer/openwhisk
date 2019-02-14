@@ -110,6 +110,10 @@ Metrics below are emitted from within a Controller instance.
   * Example _openwhisk.counter.controller_startup0_count_
   * Records count of controller instance startup
 
+##### Controller Activation Retrieval During Blocking Invocations
+
+* `openwhisk.counter.controller_blockingActivationDatabaseRetrieval_count` (counter) - Records the count of activations the controller has retrieved from the activation store during blocking invocations
+
 ##### Activation Submission
 
 Following metrics record stats around activation handling within Controller
@@ -178,34 +182,40 @@ Metrics below are for invoker state as recorded within load balancer monitoring.
 
 Following metrics capture stats around various docker command executions.
 
-* Pause
+* pause
   * `openwhisk.counter.invoker_docker.pause_start`
   * `openwhisk.counter.invoker_docker.pause_error`
+  * `openwhisk.counter.invoker_docker.pause_timeout`
   * `openwhisk.histogram.invoker_docker.pause_finish`
   * `openwhisk.histogram.invoker_docker.pause_error`
-* Ps
+* ps
   * `openwhisk.counter.invoker_docker.ps_start`
   * `openwhisk.counter.invoker_docker.ps_error`
+  * `openwhisk.counter.invoker_docker.ps_timeout`
   * `openwhisk.histogram.invoker_docker.ps_finish`
   * `openwhisk.histogram.invoker_docker.ps_error`
 * pull
   * `openwhisk.counter.invoker_docker.pull_start`
   * `openwhisk.counter.invoker_docker.pull_error`
+  * `openwhisk.counter.invoker_docker.pull_timeout`
   * `openwhisk.histogram.invoker_docker.pull_finish`
   * `openwhisk.histogram.invoker_docker.pull_error`
 * rm
   * `openwhisk.counter.invoker_docker.rm_start`
   * `openwhisk.counter.invoker_docker.rm_error`
+  * `openwhisk.counter.invoker_docker.rm_timeout`
   * `openwhisk.histogram.invoker_docker.rm_finish`
   * `openwhisk.histogram.invoker_docker.rm_error`
 * run
   * `openwhisk.counter.invoker_docker.run_start`
   * `openwhisk.counter.invoker_docker.run_error`
+  * `openwhisk.counter.invoker_docker.run_timeout`
   * `openwhisk.histogram.invoker_docker.run_finish`
   * `openwhisk.histogram.invoker_docker.run_error`
 * unpause
   * `openwhisk.counter.invoker_docker.unpause_start`
   * `openwhisk.counter.invoker_docker.unpause_error`
+  * `openwhisk.counter.invoker_docker.unpause_timeout`
   * `openwhisk.histogram.invoker_docker.unpause_finish`
   * `openwhisk.histogram.invoker_docker.unpause_error`
 
@@ -213,7 +223,7 @@ Following metrics capture stats around various docker command executions.
 
 Metrics below are emitted per kafka topic.
 
-* `openwhisk.histogram.kafka_<topic name>.delay_start` - Time delay between when a message was pushed to kafka and when it is read within a consumer. This metric is recorded for every message read.
+* `openwhisk.histogram.kafka_<topic name>.delay_start` - Time delay between when a message was pushed to Kafka and when it is read within a consumer. This metric is recorded for every message read.
 * `openwhisk.histogram.kafka_<topic name>_count` - Records the Queue size of the topic. By default this metric is emitted every 60 secs.
 
 Metrics per topic
@@ -252,6 +262,18 @@ Operation Types
 * `saveDocument`
 * `saveDocumentBulk`
 
+#### CosmosDB RU Metrics
+
+When database used is CosmosDB then metrics related to CosmosDB Resource Units is also emitted.
+
+If Kamon tags are enabled then metric name is `openwhisk.counter.cosmosdb_ru_used` with following tags
+
+- `mode` - `read` or `write`
+- `collection` - Name of collection. Example `activations`, `whisks` and `subjects`
+- `action` - Type of operation performed. Example `get`, `put`, `del`, `query` and `count`
+
+If Kamon tags are not enabled then metric name is of the form `openwhisk.counter.cosmosdb.ru.<collecton>.<action>`
+
 ## User specific metrics
 ### Configuration
 User metrics are enabled by default and could be explicitly disabled by setting the following property in one of the Ansible configuration files:
@@ -269,7 +291,7 @@ duration - actual time the action code was running
 kind - action flavor, e.g. Node.js
 conductor - true for conductor backed actions
 memory - maximum memory allowed for action container
-causedBy - true for sequence actions
+causedBy - contains the "causedBy" annotation (can be "sequence" or nothing at the moment)
 ```
 Metric is any user specific event produced by the system and it at this moment includes the following information:
 ```

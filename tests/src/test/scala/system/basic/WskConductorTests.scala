@@ -25,9 +25,9 @@ import common._
 import common.rest.WskRestOperations
 import spray.json._
 import spray.json.DefaultJsonProtocol._
-import whisk.core.entity.size.SizeInt
-import whisk.core.WhiskConfig
-import whisk.http.Messages._
+import org.apache.openwhisk.core.entity.size.SizeInt
+import org.apache.openwhisk.core.WhiskConfig
+import org.apache.openwhisk.http.Messages._
 
 @RunWith(classOf[JUnitRunner])
 class WskConductorTests extends TestHelpers with WskTestHelpers with JsHelpers with StreamLogging with WskActorSystem {
@@ -41,8 +41,7 @@ class WskConductorTests extends TestHelpers with WskTestHelpers with JsHelpers w
   val invalid = "invalid#Action"
   val missing = "missingAction"
 
-  val whiskConfig = new WhiskConfig(Map(WhiskConfig.actionSequenceMaxLimit -> null))
-  assert(whiskConfig.isValid)
+  val whiskConfig = new WhiskConfig(Map(WhiskConfig.actionSequenceMaxLimit -> "50"))
   val limit = whiskConfig.actionSequenceLimit.toInt
 
   behavior of "Whisk conductor actions"

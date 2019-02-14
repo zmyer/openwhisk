@@ -1,12 +1,12 @@
 openwhisk.home={{ openwhisk_home }}
 
 python.27=python
-use.cli.download=false
 nginx.conf.dir={{ nginx.confdir }}
 testing.auth={{ openwhisk_home }}/ansible/files/auth.guest
 vcap.services.file=
 
 whisk.logs.dir={{ whisk_logs_dir }}
+whisk.coverage.logs.dir={{ coverage_logs_dir | default('') }}
 environment.type={{ environmentInformation.type }}
 whisk.ssl.client.verification={{ nginx.ssl.verify_client }}
 whisk.ssl.cert={{ nginx.ssl.path }}/{{ nginx.ssl.cert }}
@@ -30,6 +30,8 @@ whisk.api.host.port={{ whisk_api_host_port | default('443') }}
 whisk.api.host.name={{ whisk_api_host_name | default(groups['edge'] | first) }}
 whisk.api.localhost.name={{ whisk_api_localhost_name | default(whisk_api_host_name) | default(whisk_api_localhost_name_default) }}
 whisk.api.vanity.subdomain.parts=1
+
+whisk.action.concurrency={{runtimes_enable_concurrency | default(false)}}
 
 runtimes.manifest={{ runtimesManifest | to_json }}
 
@@ -58,8 +60,6 @@ controller.protocol={{ controller.protocol }}
 invoker.container.network=bridge
 invoker.container.policy={{ invoker_container_policy_name | default()}}
 invoker.container.dns={{ invoker_container_network_dns_servers | default()}}
-invoker.numcore={{ invoker.numcore }}
-invoker.coreshare={{ invoker.coreshare }}
 invoker.useRunc={{ invoker.useRunc }}
 
 main.docker.endpoint={{ hostvars[groups["controllers"]|first].ansible_host }}:{{ docker.port }}
@@ -91,5 +91,3 @@ db.instances={{ db.instances }}
 apigw.auth.user={{apigw_auth_user}}
 apigw.auth.pwd={{apigw_auth_pwd}}
 apigw.host.v2={{apigw_host_v2}}
-
-loadbalancer.invokerBusyThreshold={{ invoker.busyThreshold }}

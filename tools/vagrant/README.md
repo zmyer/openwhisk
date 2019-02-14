@@ -22,8 +22,10 @@
 The following instructions were tested on Mac OS X El Capitan, Ubuntu 16.04 LTS.
 
 ## Requirements
--   Install [VirtualBox](https://www.virtualbox.org/wiki/Downloads) (tested with version 5.2.8)
--   Install [Vagrant](https://www.vagrantup.com/downloads.html) (tested with version 2.0.3)
+-   Install [VirtualBox](https://www.virtualbox.org/wiki/Downloads) (tested with version 6.0.2)
+-   Install [Vagrant](https://www.vagrantup.com/downloads.html) (tested with version 2.2.3)
+
+*There is an issue with the `ubuntu/xenial64` image (v20190118.0.0 at the time of writing this) on MacOS Mojave 10.14.2 and VirtualBox 6. This can be fixed by replacing this image with `bento/ubuntu-16.04`. See below the "Override Vagrant Box" section to find out how to use another image.*
 
 ## Setup
 
@@ -69,7 +71,7 @@ export OW_DB_PORT=5984 ./hello
 **Note:**
 Data will persist after [safe re-deploy](#safe-re-deploy-after-vm-restart),
 but will be destroyed if you
-initialze the DB. For more information on data store configurations see
+initialize the DB. For more information on data store configurations see
 [tools/db/README.md](../db/README.md).
 
 
@@ -101,7 +103,10 @@ same IP address.
 
 The CLI is available in `../../bin`.
 The CLI `../../bin/wsk` is for Linux amd64.
-The CLI for other operating systems and architectures can be found under `../../bin/openwhisk-cli/build/`
+The CLI for all other operating systems and architectures (as well as Linux) can be
+downloaded in a compressed format from [https://github.com/apache/incubator-openwhisk-cli/releases](https://github.com/apache/incubator-openwhisk-cli/releases) .
+For more details, please consult the relevant [documentation](https://openwhisk.apache.org/documentation.html) section "Download and
+install the wsk CLI from (Linux, Mac or Windows):".
 
 When using the CLI with a local deployment of OpenWhisk (which provides an
 insecure/self-signed SSL certificate), you must use the argument `-i` to permit
@@ -113,10 +118,12 @@ location of the binary that corresponds to your environment.
 
 From your _host_, configure `wsk` to use your Vagrant-hosted OpenWhisk
 deployment and run the "echo" action again to test. The following commands
-assume that you have `wsk` setup correctly in your PATH.
+assume that you have `wsk` setup correctly in your PATH (and that you are using
+Powershell if your deployment is hosted in Windows).
 ```
 # Set your OpenWhisk Authorization Key.
-wsk property set --apihost 192.168.33.16 --auth `vagrant ssh -- cat openwhisk/ansible/files/auth.guest`
+
+wsk property set --apihost 192.168.33.16 --auth $(vagrant ssh -- cat openwhisk/ansible/files/auth.guest)
 
 # Run the hello sample action
 wsk -i action invoke /whisk.system/utils/echo -p message hello --result
@@ -131,7 +138,7 @@ Vagrant installation is self-signed. Alternatively, you can configure your
 _apihost_ to use the non-SSL interface:
 
 ```
-wsk property set --apihost http://192.168.33.16:10001 --auth `vagrant ssh -- cat openwhisk/ansible/files/auth.guest`
+wsk property set --apihost http://192.168.33.16:10001 --auth $(vagrant ssh -- cat openwhisk/ansible/files/auth.guest)
 ```
 
 You do not need to use the `-i` switch to `wsk` now. Note, however, that `wsk
@@ -170,7 +177,7 @@ cd ${OPENWHISK_HOME}
 ```
 
 ## Building OpenWhisk
-Use gradle to build docker images from inside the VM, this is done automatically
+Use Gradle to build docker images from inside the VM, this is done automatically
 once at VM creation.
 
 ```
@@ -200,9 +207,9 @@ Then update line with the curl download command like
 ```
 RUN curl -sSL -o docker-${DOCKER_VERSION}.tgz https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_VERSION}.tgz && \
 ```
-Notice that the hostname where to download the cli is different for newer versions.
+Notice that the hostname where to download the CLI is different for newer versions.
 
-Then update the ansible configuration to enable the use of runc, edit [](../../ansible/environments/vagrant/group_vars/all)
+Then update the Ansible configuration to enable the use of runc, edit [](../../ansible/environments/vagrant/group_vars/all)
 ```
 invoker_use_runc: true
 ```
@@ -227,7 +234,7 @@ Do not restart the VM using Virtual Box tools, and always use `vagrant` from the
 command line: `vagrant up` to start the VM and `vagrant reload` to restart it.
 This allows the `$HOME/openwhisk` folder to be available inside the VM.
 
-**Tip** If you have problems with data stores check that `ansible/db_local.ini`.
+**Tip** If you have problems with data stores check that `ansible/db_local.ini` exists.
 
 **Tip**
 To initialize the data store from scratch run `ansible-playbook -i
@@ -302,3 +309,12 @@ Ignore error message `Sub-process /usr/bin/dpkg returned an error code (1)` when
 creating Vagrant VM using `gui-true`. Remember to use `gui=true` every time you
 do `vagrant reload`. Or, you can enable the GUI directly by editing the Vagrant
 file.
+
+## Lean Setup
+To have a lean setup (no Kafka, Zookeeper and no Invokers as separate entities)
+
+Set environment variable LEAN to true before creating vagrant VM
+```
+export LEAN=true
+```
+

@@ -19,7 +19,7 @@ package common
 
 import java.io.File
 
-import scala.collection.JavaConversions.mapAsJavaMap
+import scala.collection.JavaConverters._
 import scala.collection.mutable.Buffer
 import org.scalatest.Matchers
 import TestUtils._
@@ -32,6 +32,8 @@ trait RunCliCmd extends Matchers {
    * The base command to run. This returns a new mutable buffer, intended for building the rest of the command line.
    */
   def baseCommand: Buffer[String]
+
+  val prohibitAuthOverride = false
 
   /**
    * Delegates execution of the command to an underlying implementation.
@@ -48,7 +50,7 @@ trait RunCliCmd extends Matchers {
              env: Map[String, String],
              fileStdin: Option[File],
              params: Seq[String]): RunResult = {
-    TestUtils.runCmd(expectedExitCode, dir, TestUtils.logger, env, fileStdin.getOrElse(null), params: _*)
+    TestUtils.runCmd(expectedExitCode, dir, TestUtils.logger, env.asJava, fileStdin.getOrElse(null), params: _*)
   }
 
   /**
@@ -63,20 +65,24 @@ trait RunCliCmd extends Matchers {
           workingDir: File = new File("."),
           stdinFile: Option[File] = None,
           showCmd: Boolean = false,
-          hideFromOutput: Seq[String] = Seq(),
+          hideFromOutput: Seq[String] = Seq.empty,
           retriesOnNetworkError: Int = 3): RunResult = {
     require(retriesOnNetworkError >= 0, "retry count on network error must not be negative")
 
     val args = baseCommand
     if (verbose) args += "--verbose"
-    if (showCmd) println(args.mkString(" ") + " " + params.mkString(" "))
+    val finalParams = if (!prohibitAuthOverride) { params } else {
+      params.filter(s =>
+        !s.equals("--auth") && !(params.indexOf(s) > 0 && params(params.indexOf(s) - 1).equals("--auth")))
+    }
+    if (showCmd) println(args.mkString(" ") + " " + finalParams.mkString(" "))
 
     val rr = retry(
       0,
       retriesOnNetworkError,
-      () => runCmd(DONTCARE_EXIT, workingDir, sys.env ++ env, stdinFile, args ++ params))
+      () => runCmd(DONTCARE_EXIT, workingDir, sys.env ++ env, stdinFile, args ++ finalParams))
 
-    withClue(hideStr(reportFailure(args ++ params, expectedExitCode, rr).toString(), hideFromOutput)) {
+    withClue(hideStr(reportFailure(args ++ finalParams, expectedExitCode, rr).toString(), hideFromOutput)) {
       if (expectedExitCode != TestUtils.DONTCARE_EXIT) {
         val ok = (rr.exitCode == expectedExitCode) || (expectedExitCode == TestUtils.ANY_ERROR_EXIT && rr.exitCode != 0)
         if (!ok) {

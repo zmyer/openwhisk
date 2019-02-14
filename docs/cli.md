@@ -26,8 +26,7 @@ OpenWhisk offers a powerful command line interface that allows complete manageme
 
 - To download the CLI from an existing deployment, you will need to download the CLI using the deployment's base URL.
 A list of downloadable CLIs for various operating systems, and CPU architectures can be obtained from the following
-location `{BASE URL}/cli/go/download`. The `{BASE URL}` is the OpenWhisk API hostname or IP address
-(e.g., openwhisk.ng.bluemix.net).
+location `{BASE URL}/cli`. The `{BASE URL}` is the OpenWhisk API hostname or IP address.
 
 There are two required properties to configure in order to use the CLI:
 
@@ -59,12 +58,15 @@ To verify your CLI setup, try [creating and running an action](./samples.md).
 ### Configure command completion for Openwhisk CLI
 
 For bash command completion to work, bash 4.1 or newer is required. The most recent Linux distributions should have the correct version of bash but Mac users will most likely have an older version.
+
 Mac users can check their bash version and update it by running the following commands:
 
 ```
 bash --version
-brew install bash-completion
+brew install bash
 ```
+
+This requires [Homebrew](https://brew.sh/) to be installed. The updated bash will be installed in `/usr/local/bin`.
 
 To write the bash command completion to your local directory, run the following command:
 
@@ -108,7 +110,7 @@ The CLI can be setup to use an HTTPS proxy. To setup an HTTPS proxy, an environm
 The CLI has an extra level of security from client to apihost, system provides default client certificate configuration which deployment process generated, then you can refer to below steps to use client certificate:
 * The client certificate verification is off default, you can configure `nginx_ssl_verify_client` to `on` or `optional` to open it for your corresponding environment configuration.
 * Create your own client certificate instead of system provides if you want, after created, you can configure `openwhisk_client_ca_cert` to your own ca cert path for your corresponding environment configuration.
-* Run the follwing command to pass client certificate:
+* Run the following command to pass client certificate:
 ```
 ./bin/wsk property set --cert <client_cert_path> --key <client_key_path>
 ```

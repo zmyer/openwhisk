@@ -70,7 +70,7 @@ More precisely, a name must match the following regular expression (expressed wi
 OpenWhisk has a few system limits, including how much memory an action can use and how many action invocations are allowed per minute.
 
 **Note:** This default limits are for the open source distribution; production deployments like IBM Cloud Functions likely have higher limits.
-As an operator or developer you can change some of the limits using [ansible inventory variables](../ansible/README.md#changing-limits).
+As an operator or developer you can change some of the limits using [Ansible inventory variables](../ansible/README.md#changing-limits).
 
 The following table lists the default limits for actions.
 
@@ -81,7 +81,7 @@ The following table lists the default limits for actions.
 | logs | a container is not allowed to write more than N MB to stdout | per action | MB | 10 |
 | concurrent | no more than N activations may be submitted per namespace either executing or queued for execution | per namespace | number | 100 |
 | minuteRate | no more than N activations may be submitted per namespace per minute | per namespace | number | 120 |
-| codeSize | the maximum size of the actioncode | not configurable, limit per action | MB | 48 |
+| codeSize | the maximum size of the action code | configurable, limit per action | MB | 48 |
 | parameters | the maximum size of the parameters that can be attached | not configurable, limit per action/package/trigger | MB | 1 |
 | result | the maximum size of the action result | not configurable, limit per action | MB | 1 |
 
@@ -100,7 +100,7 @@ The following table lists the default limits for actions.
 * A user can change the limit when creating or updating the action.
 * Logs that exceed the set limit are truncated and a warning is added as the last output of the activation to indicate that the activation exceeded the set log limit.
 
-### Per action artifact (MB) (Fixed: 48MB)
+### Per action artifact (MB) (Default: 48MB)
 * The maximum code size for the action is 48MB.
 * It is recommended for a JavaScript action to use a tool to concatenate all source code including dependencies into a single bundled file.
 

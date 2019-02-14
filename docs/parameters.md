@@ -21,11 +21,12 @@
 
 When working with serverless actions, data is supplied by adding parameters to the actions; these are in the parameter declared as an argument to the main serverless function. All data arrives this way and the values can be set in a few different ways. The first option is to supply parameters when an action or package is created (or updated). This approach is useful for data that stays the same on every execution, equivalent to environment variables on other platforms, or for default values that might be overridden at invocation time. The second option is to supply parameters when the action is invoked - and this approach will override any parameters already set.
 
-This page outlines how to configure parameters when deploying packages and actions, and how to supply parameters when invoking an action. There is also information on how to use a file to store the parameters and pass the filename, rather than supplying each parameter individually on the comandline.
+This page outlines how to configure parameters when deploying packages and actions, and how to supply parameters when invoking an action. There is also information on how to use a file to store the parameters and pass the filename, rather than supplying each parameter individually on the command-line.
 
 ### Passing parameters to an action at invoke time
 
-Parameters can be passed to the action when it is invoked. These examples use JavaScript but all the other languages work the same way (see documentation on [Swift actions](./actions.md#creating-swift-actions), [Python actions](./actions.mdcreating-python-actions), [Java actions](./actions.mdcreating-java-actions), [PHP actions](./actions.mdcreating-php-actions), [Docker actions](./actions.mdcreating-docker-actions) or [Go actions](./actions.mdcreating-go-actions) as appropriate for more detailed examples).
+Parameters can be passed to the action when it is invoked. These examples use JavaScript but all [the other
+languages](actions.md#languages-and-runtimes) work the same way.
 
 1. Use parameters in the action. For example, create 'hello.js' file with the following content:
 

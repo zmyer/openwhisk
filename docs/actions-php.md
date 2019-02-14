@@ -23,10 +23,13 @@ The process of creating PHP actions is similar to that of [other actions](action
 The following sections guide you through creating and invoking a single PHP action,
 and demonstrate how to bundle multiple PHP files and third party dependencies.
 
-PHP actions are executed using PHP 7.2.6, with PHP 7.1.18 also available.
-To use the PHP 7.2 runtime, specify the `wsk` CLI parameter `--kind php:7.2` when creating or updating an action.
-This is the default when creating an action with file that has a `.php` extension.
-You can use `-- kind php:7.1 to use the PHP 7.1 runtime.
+PHP actions are executed using PHP 7.3. The specific
+version of PHP is listed in the CHANGELOG files in the [PHP runtime repository](https://github.com/apache/incubator-openwhisk-runtime-php).
+
+To use a PHP runtime, specify the `wsk` CLI parameter `--kind` when creating or
+updating an action. The available PHP kinds are:
+
+* PHP 7.3: `--kind php:7.3`
 
 An action is simply a top-level PHP function. For example, create a file called `hello.php`
 with the following source code:
@@ -53,7 +56,7 @@ wsk action create helloPHP hello.php
 ```
 
 The CLI automatically infers the type of the action from the source file extension.
-For `.php` source files, the action runs using a PHP 7.2 runtime.
+For `.php` source files, the action runs using a PHP 7.3 runtime.
 
 Action invocation is the same for PHP actions as it is for [any other action](actions.md#the-basics).
 
@@ -83,7 +86,7 @@ zip -r helloPHP.zip index.php helper.php
 and then create the action:
 
 ```bash
-wsk action create helloPHP --kind php:7.1 helloPHP.zip
+wsk action create helloPHP --kind php:7.3 helloPHP.zip
 ```
 
 ## Including Composer dependencies
@@ -94,15 +97,19 @@ Add this directory to your action's zip file and create the action:
 
 ```bash
 zip -r helloPHP.zip index.php vendor
-wsk action create helloPHP --kind php:7.1 helloPHP.zip
+wsk action create helloPHP --kind php:7.3 helloPHP.zip
 ```
 
 The PHP runtime will automatically include Composer's autoloader for you, so you can immediately
 use the dependencies in your action code. Note that if you don't include your own `vendor` folder,
 then the runtime will include one for you with the following Composer packages:
 
-- guzzlehttp/guzzle       v6.3.3
-- ramsey/uuid             v3.7.3
+- guzzlehttp/guzzle
+- ramsey/uuid
+
+The specific versions of these packages depends on the PHP runtime in use and is listed in the
+CHANGELOG files in the [PHP runtime repository](https://github.com/apache/incubator-openwhisk-runtime-php).
+
 
 ## Built-in PHP extensions
 

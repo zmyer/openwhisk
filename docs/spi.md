@@ -20,9 +20,9 @@
 # SPI extensions in OpenWhisk
 
 Alternate implementations of various components follow an SPI (Service Provider Interface) pattern:
-* The pluggable component is defined as an Spi trait:
+* The pluggable component is defined as an SPI trait:
 ```scala
-import whisk.spi.Spi
+import org.apache.openwhisk.spi.Spi
 trait ThisIsPluggable extends Spi { ... }
 ```
 * Implementations implement the Spi trait
@@ -31,19 +31,19 @@ class TheImpl extends ThisIsPluggable { ... }
 class TheOtherImpl extends ThisIsPluggable { ... }
 ```
 
-Runtime resolution of an Spi trait to a specific implementation is provided by:
-* `SpiLoader` - a utility for loading the implementation of a specific Spi, using a resolver to determine the implentations factory classname, and reflection to load the factory object.
-* `application.conf` - each `Spi` is resolved to a classname based on the config key provided to `SpiLoader`.
+Runtime resolution of an SPI trait to a specific implementation is provided by:
+* `SpiLoader` - a utility for loading the implementation of a specific SPI, using a resolver to determine the implementations factory classname, and reflection to load the factory object.
+* `application.conf` - each `SPI` is resolved to a classname based on the config key provided to `SpiLoader`.
 
-Only a single implementation per Spi is usable at runtime, since the key will have a single string value.
+Only a single implementation per SPI is usable at runtime, since the key will have a single string value.
 
 # Example
 
 The process to create and use an SPI is as follows:
 
-## Define the Spi and implementations
+## Define the SPI and implementations
 
-* Create your Spi trait `YourSpi` as a trait that is an extension of `whisk.spi.Spi`.
+* Create your SPI trait `YourSpi` as a trait that is an extension of `whisk.spi.Spi`.
 * Create your factory object which extends `YourSpi` and provides the relevant functionality.
 * Create your functionality classes with whatever name you like. The factory object is supposed to build and return those instances.
 
@@ -53,7 +53,7 @@ SpiLoader uses a TypesafeConfig key to use for resolving which implementation sh
 
 The config key used to find the implementations classname is `whisk.spi.<SpiInterface>`.
 
-For example, the SPI interface `whisk.core.database.ArtifactStoreProvider` would load a specific implementation indicated by the  `whisk.spi.ArtifactStoreProvider` config key.
+For example, the SPI interface `org.apache.openwhisk.core.database.ArtifactStoreProvider` would load a specific implementation indicated by the  `whisk.spi.ArtifactStoreProvider` config key.
 
 (so you cannot use multiple SPI interfaces with the same class name in different packages)
 
@@ -83,7 +83,7 @@ Since SPI implementations are loaded from the classpath, and a specific implemen
 
 ## Including the implementation
 
-Base openwhisk docker images provide 2 extension points in the classpath for including the implementation.
+Base OpenWhisk docker images provide 2 extension points in the classpath for including the implementation.
 
 ### Application Jars
 

@@ -70,16 +70,18 @@ The test is doing as many requests as possible for the given amount of time (`SE
 Available environment variables:
 
 ```
-OPENWHISK_HOST          (required)
-CONNECTIONS             (required)
-SECONDS                 (default: 10)
-REQUESTS_PER_SEC        (required)
-MIN_REQUESTS_PER_SEC    (default: REQUESTS_PER_SEC)
+OPENWHISK_HOST                (required)
+CONNECTIONS                   (required)
+SECONDS                       (default: 10)
+REQUESTS_PER_SEC              (required)
+MIN_REQUESTS_PER_SEC          (default: REQUESTS_PER_SEC)
+MAX_ERRORS_ALLOWED            (default: 0)
+MAX_ERRORS_ALLOWED_PERCENTAGE (default: 0)
 ```
 
 You can run the simulation with (in OPENWHISK_HOME)
 ```
-OPENWHISK_HOST="openwhisk.mydomain.com" CONNECTIONS="10" REQUESTS_PER_SEC="50" ./gradlew gatlingRun-ApiV1Simulation
+OPENWHISK_HOST="openwhisk.mydomain.com" CONNECTIONS="10" REQUESTS_PER_SEC="50" ./gradlew gatlingRun-org.apache.openwhisk.ApiV1Simulation
 ```
 
 ##### Latency Simulation
@@ -101,17 +103,23 @@ The comparison of the thresholds is against the mean response times of the warm 
 Available environment variables:
 
 ```
-OPENWHISK_HOST          (required)
-API_KEY                 (required, format: UUID:KEY)
-PAUSE_BETWEEN_INVOKES   (default: 0)
-MEAN_RESPONSE_TIME      (required)
-MAX_MEAN_RESPONSE_TIME  (default: MEAN_RESPONSE_TIME)
-EXCLUDED_KINDS          (default: "", format: "python:default,java:default,swift:default")
+OPENWHISK_HOST                (required)
+API_KEY                       (required, format: UUID:KEY)
+PAUSE_BETWEEN_INVOKES         (default: 0)
+MEAN_RESPONSE_TIME            (required)
+MAX_MEAN_RESPONSE_TIME        (default: MEAN_RESPONSE_TIME)
+EXCLUDED_KINDS                (default: "", format: "python:default,java:default,swift:default")
+MAX_ERRORS_ALLOWED            (default: 0)
+MAX_ERRORS_ALLOWED_PERCENTAGE (default: 0)
 ```
+
+It is possible to override the `MEAN_RESPONSE_TIME`, `MAX_MEAN_RESPONSE_TIME`, `MAX_ERRORS_ALLOWED` and `MAX_ERRORS_ALLOWED_PERCENTAGE`
+for each kind by adding the kind as prefix in upper case, like `JAVA_MEAN_RESPONSE_TIME`.
+
 
 You can run the simulation with (in OPENWHISK_HOME)
 ```
-OPENWHISK_HOST="openwhisk.mydomain.com" MEAN_RESPONSE_TIME="20" API_KEY="UUID:KEY" ./gradlew gatlingRun-LatencySimulation
+OPENWHISK_HOST="openwhisk.mydomain.com" MEAN_RESPONSE_TIME="20" API_KEY="UUID:KEY" ./gradlew gatlingRun-org.apache.openwhisk.LatencySimulation
 ```
 
 ##### BlockingInvokeOneActionSimulation
@@ -119,7 +127,7 @@ OPENWHISK_HOST="openwhisk.mydomain.com" MEAN_RESPONSE_TIME="20" API_KEY="UUID:KE
 This simulation executes the same action with the same user over and over again.
 The aim of this test is, to test the throughput of the system, if all containers are always warm.
 
-The action that is invoked, writes one log line and returns a little json.
+The action that is invoked, writes one log line and returns a little JSON.
 
 The simulations creates the action in the beginning, invokes it as often as possible for 5 seconds, to warm all containers up and invokes it afterwards for the given amount of time.
 The warmup-phase will not be part of the assertions.
@@ -130,22 +138,24 @@ The test is doing as many requests as possible for the given amount of time (`SE
 
 Available environment variables:
 ```
-OPENWHISK_HOST          (required)
-API_KEY                 (required, format: UUID:KEY)
-CONNECTIONS             (required)
-SECONDS                 (default: 10)
-REQUESTS_PER_SEC        (required)
-MIN_REQUESTS_PER_SEC    (default: REQUESTS_PER_SEC)
+OPENWHISK_HOST                (required)
+API_KEY                       (required, format: UUID:KEY)
+CONNECTIONS                   (required)
+SECONDS                       (default: 10)
+REQUESTS_PER_SEC              (required)
+MIN_REQUESTS_PER_SEC          (default: REQUESTS_PER_SEC)
+MAX_ERRORS_ALLOWED            (default: 0)
+MAX_ERRORS_ALLOWED_PERCENTAGE (default: 0)
 ```
 
 You can run the simulation with
 ```
-OPENWHISK_HOST="openwhisk.mydomain.com" CONNECTIONS="10" REQUESTS_PER_SEC="50" API_KEY="UUID:KEY" ./gradlew gatlingRun-BlockingInvokeOneActionSimulation
+OPENWHISK_HOST="openwhisk.mydomain.com" CONNECTIONS="10" REQUESTS_PER_SEC="50" API_KEY="UUID:KEY" ./gradlew gatlingRun-org.apache.openwhisk.BlockingInvokeOneActionSimulation
 ```
 
 ##### ColdBlockingInvokeSimulation
 
-This simulation makes as much cold invocations as possible. Therefor you have to specify, how many users should be used.
+This simulation makes as much cold invocations as possible. Therefore, you have to specify how many users should be used.
 This amount of users is executing actions in parallel. I recommend using the same amount of users like your amount of node-js action slots in your invokers.
 
 The users, that are used are loaded from the file `gatling_tests/src/gatling/resources/data/users.csv`. If you want to increase the number of parallel users, you have to specify at least this amount of valid users in that file.
@@ -154,20 +164,22 @@ Each user creates n actions (default is 5). Afterwards all users are executing t
 
 The aim of the test is, to test the throughput of the system, if all containers are always cold.
 
-The action that is invoked, writes one log line and returns a little json.
+The action that is invoked, writes one log line and returns a little JSON.
 
 The test is doing as many requests as possible for the given amount of time (`SECONDS`). Afterwards it compares if the test reached the intended throughput (`REQUESTS_PER_SEC`, `MIN_REQUESTS_PER_SEC`).
 
 Available environment variables:
 ```
-OPENWHISK_HOST          (required)
-USERS                   (required)
-SECONDS                 (default: 10)
-REQUESTS_PER_SEC        (required)
-MIN_REQUESTS_PER_SEC    (default: REQUESTS_PER_SEC)
+OPENWHISK_HOST                (required)
+USERS                         (required)
+SECONDS                       (default: 10)
+REQUESTS_PER_SEC              (required)
+MIN_REQUESTS_PER_SEC          (default: REQUESTS_PER_SEC)
+MAX_ERRORS_ALLOWED            (default: 0)
+MAX_ERRORS_ALLOWED_PERCENTAGE (default: 0)
 ```
 
 You can run the simulation with
 ```
-OPENWHISK_HOST="openwhisk.mydomain.com" USERS="10" REQUESTS_PER_SEC="50" ./gradlew gatlingRun-ColdBlockingInvokeSimulation
+OPENWHISK_HOST="openwhisk.mydomain.com" USERS="10" REQUESTS_PER_SEC="50" ./gradlew gatlingRun-org.apache.openwhisk.ColdBlockingInvokeSimulation
 ```

@@ -32,7 +32,8 @@ import common.rest.WskRestOperations
 import common.rest.RestResult
 import spray.json._
 import spray.json.DefaultJsonProtocol._
-import whisk.http.Messages
+import org.apache.openwhisk.core.containerpool.Container
+import org.apache.openwhisk.http.Messages
 
 @RunWith(classOf[JUnitRunner])
 class WskRestBasicTests extends TestHelpers with WskTestHelpers with WskActorSystem {
@@ -45,7 +46,7 @@ class WskRestBasicTests extends TestHelpers with WskTestHelpers with WskActorSys
   /**
    * Retry operations that need to settle the controller cache
    */
-  def cacheRetry[T](fn: => T) = whisk.utils.retry(fn, 5, Some(1.second))
+  def cacheRetry[T](fn: => T) = org.apache.openwhisk.utils.retry(fn, 5, Some(1.second))
 
   behavior of "Wsk REST"
 
@@ -92,7 +93,7 @@ class WskRestBasicTests extends TestHelpers with WskTestHelpers with WskActorSys
     pack.getFieldJsValue("publish") shouldBe JsBoolean(true)
     pack.getFieldJsValue("parameters") shouldBe JsArray(JsObject("key" -> JsString("a"), "value" -> JsString("A")))
     val packageList = wsk.pkg.list()
-    val packages = packageList.getBodyListJsObject()
+    val packages = packageList.getBodyListJsObject
     packages.exists(pack => RestResult.getField(pack, "name") == name) shouldBe true
   }
 
@@ -232,7 +233,7 @@ class WskRestBasicTests extends TestHelpers with WskTestHelpers with WskActorSys
     action.getFieldJsValue("parameters") shouldBe JsArray(JsObject("key" -> JsString("b"), "value" -> JsString("B")))
     action.getFieldJsValue("publish") shouldBe JsBoolean(false)
     val actionList = wsk.action.list()
-    val actions = actionList.getBodyListJsObject()
+    val actions = actionList.getBodyListJsObject
     actions.exists(action => RestResult.getField(action, "name") == name) shouldBe true
   }
 
@@ -293,13 +294,13 @@ class WskRestBasicTests extends TestHelpers with WskTestHelpers with WskActorSys
           action.create(name, Some(TestUtils.getTestActionFilename("blackbox.zip")), kind = Some("native"))
       }
 
-      val run = wsk.action.invoke(name, Map())
+      val run = wsk.action.invoke(name, Map.empty)
       withActivation(wsk.activation, run) { activation =>
         activation.response.result shouldBe Some(JsObject("msg" -> "hello zip".toJson))
         activation.logs shouldBe defined
         val logs = activation.logs.get.toString
         logs should include("This is an example zip used with the docker skeleton action.")
-        logs should not include ("XXX_THE_END_OF_A_WHISK_ACTIVATION_XXX")
+        logs should not include Container.ACTIVATION_LOG_SENTINEL
       }
   }
 
@@ -346,7 +347,8 @@ class WskRestBasicTests extends TestHelpers with WskTestHelpers with WskActorSys
       result.getFieldJsValue("limits") shouldBe JsObject(
         "timeout" -> JsNumber(60000),
         "memory" -> JsNumber(256),
-        "logs" -> JsNumber(10))
+        "logs" -> JsNumber(10),
+        "concurrency" -> JsNumber(1))
       result.getField("invalid") shouldBe ""
   }
 
@@ -481,7 +483,6 @@ class WskRestBasicTests extends TestHelpers with WskTestHelpers with WskActorSys
     // Sleep time must be larger than 60 seconds to see the expected exit code
     // Set sleep time to a value smaller than allowedActionDuration to not raise a timeout
     val sleepTime = allowedActionDuration - 20.seconds
-    sleepTime should be >= 60.seconds
     val params = Map("sleepTimeInMs" -> sleepTime.toMillis.toJson)
     val res = assetHelper.withCleaner(wsk.action, name) { (action, _) =>
       action.create(name, Some(TestUtils.getTestActionFilename("sleep.js")), timeout = Some(allowedActionDuration))
@@ -496,7 +497,7 @@ class WskRestBasicTests extends TestHelpers with WskTestHelpers with WskActorSys
         action.create(name, None, docker = Some("fake-container"))
       }
 
-      wsk.action.get(name).stdout should not include (""""code"""")
+      wsk.action.get(name).stdout should not include """"code""""
   }
 
   behavior of "Wsk Trigger REST"
@@ -558,7 +559,7 @@ class WskRestBasicTests extends TestHelpers with WskTestHelpers with WskActorSys
       logs shouldBe expectedLogs
     }
 
-    val runWithNoParams = wsk.trigger.fire(triggerName, Map())
+    val runWithNoParams = wsk.trigger.fire(triggerName, Map.empty)
     withActivation(wsk.activation, runWithNoParams) { activation =>
       activation.response.result shouldBe Some(JsObject.empty)
       activation.duration shouldBe 0L // shouldn't exist but CLI generates it
@@ -566,7 +567,7 @@ class WskRestBasicTests extends TestHelpers with WskTestHelpers with WskActorSys
     }
 
     val triggerList = wsk.trigger.list()
-    val triggers = triggerList.getBodyListJsObject()
+    val triggers = triggerList.getBodyListJsObject
     triggers.exists(trigger => RestResult.getField(trigger, "name") == triggerName) shouldBe true
   }
 
@@ -861,7 +862,7 @@ class WskRestBasicTests extends TestHelpers with WskTestHelpers with WskActorSys
     rule.getField("name") shouldBe ruleName
     RestResult.getField(rule.getFieldJsObject("trigger"), "name") shouldBe triggerName
     RestResult.getField(rule.getFieldJsObject("action"), "name") shouldBe actionName
-    val rules = wsk.rule.list().getBodyListJsObject()
+    val rules = wsk.rule.list().getBodyListJsObject
     rules.exists { rule =>
       RestResult.getField(rule, "name") == ruleName
     } shouldBe true
@@ -937,9 +938,9 @@ class WskRestBasicTests extends TestHelpers with WskTestHelpers with WskActorSys
       val result = wsk.rule.get(ruleName)
       val trigger = result.getFieldJsValue("trigger").toString
       trigger should include(triggerName)
-      trigger should not include (actionName)
+      trigger should not include actionName
       val action = result.getFieldJsValue("action").toString
-      action should not include (triggerName)
+      action should not include triggerName
       action should include(actionName)
   }
 
@@ -1000,7 +1001,7 @@ class WskRestBasicTests extends TestHelpers with WskTestHelpers with WskActorSys
 
   it should "return a list of exactly one namespace" in {
     val lines = wsk.namespace.list()
-    lines.getBodyListString().size shouldBe 1
+    lines.getBodyListString.size shouldBe 1
   }
 
   behavior of "Wsk Activation REST"

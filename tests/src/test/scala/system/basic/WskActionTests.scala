@@ -17,10 +17,14 @@
 
 package system.basic
 
+import java.io.File
+import java.nio.charset.StandardCharsets
+
 import org.junit.runner.RunWith
 import org.scalatest.junit.JUnitRunner
 import common._
 import common.rest.WskRestOperations
+import org.apache.commons.io.FileUtils
 import spray.json._
 import spray.json.DefaultJsonProtocol._
 
@@ -28,6 +32,8 @@ import spray.json.DefaultJsonProtocol._
 class WskActionTests extends TestHelpers with WskTestHelpers with JsHelpers with WskActorSystem {
 
   implicit val wskprops = WskProps()
+  // wsk must have type WskOperations so that tests using CLI (class Wsk)
+  // instead of REST (WskRestOperations) still work.
   val wsk: WskOperations = new WskRestOperations
 
   val testString = "this is a test"
@@ -68,6 +74,21 @@ class WskActionTests extends TestHelpers with WskTestHelpers with JsHelpers with
       activation.response.status shouldBe "success"
       activation.response.result shouldBe Some(testResult)
       activation.logs.get.mkString(" ") should include(testString)
+    }
+  }
+
+  it should "invoke an action that throws an uncaught exception and returns correct status code" in withAssetCleaner(
+    wskprops) { (wp, assetHelper) =>
+    val name = "throwExceptionAction"
+    assetHelper.withCleaner(wsk.action, name) { (action, _) =>
+      action.create(name, Some(TestUtils.getTestActionFilename("runexception.js")))
+    }
+
+    withActivation(wsk.activation, wsk.action.invoke(name)) { activation =>
+      val response = activation.response
+      activation.response.status shouldBe "action developer error"
+      activation.response.result shouldBe Some(
+        JsObject("error" -> "An error has occurred: Extraordinary exception".toJson))
     }
   }
 
@@ -182,8 +203,8 @@ class WskActionTests extends TestHelpers with WskTestHelpers with JsHelpers with
       val copiedAction = wsk.parseJsonString(wsk.action.get(copiedName).stdout)
 
       // CLI does not guarantee order of annotations and parameters so do a diff to compare the values
-      copiedAction.fields("parameters").convertTo[Seq[JsObject]] diff resParams shouldBe List()
-      copiedAction.fields("annotations").convertTo[Seq[JsObject]] diff resAnnots shouldBe List()
+      copiedAction.fields("parameters").convertTo[Seq[JsObject]] diff resParams shouldBe List.empty
+      copiedAction.fields("annotations").convertTo[Seq[JsObject]] diff resAnnots shouldBe List.empty
   }
 
   it should "recreate and invoke a new action with different code" in withAssetCleaner(wskprops) { (wp, assetHelper) =>
@@ -254,7 +275,7 @@ class WskActionTests extends TestHelpers with WskTestHelpers with JsHelpers with
     withClue(s"check failed for activation: $activation") {
       activation.response.status shouldBe "success"
       activation.response.result shouldBe Some(testResult)
-      activation.logs shouldBe Some(List())
+      activation.logs shouldBe Some(List.empty)
     }
   }
 
@@ -266,8 +287,13 @@ class WskActionTests extends TestHelpers with WskTestHelpers with JsHelpers with
 
     val run = wsk.action.invoke(name, Map("payload" -> "google.com".toJson))
     withActivation(wsk.activation, run) { activation =>
-      activation.response.result shouldBe Some(
-        JsObject("stderr" -> "ping: icmp open socket: Operation not permitted\n".toJson, "stdout" -> "".toJson))
+      val result = activation.response.result.get
+      result.getFields("stdout", "code") match {
+        case Seq(JsString(stdout), JsNumber(code)) =>
+          stdout should not include "bytes from"
+          code.intValue() should not be 0
+        case _ => fail(s"fields 'stdout' or 'code' where not of the expected format, was $result")
+      }
     }
   }
 
@@ -284,4 +310,26 @@ class WskActionTests extends TestHelpers with WskTestHelpers with JsHelpers with
       activation.logs.get.mkString(" ") should include(s"hello, $utf8")
     }
   }
+
+  it should "invoke action with large code" in withAssetCleaner(wskprops) { (wp, assetHelper) =>
+    val name = "big-hello"
+    assetHelper.withCleaner(wsk.action, name) { (action, _) =>
+      val filePath = TestUtils.getTestActionFilename("hello.js")
+      val code = FileUtils.readFileToString(new File(filePath), StandardCharsets.UTF_8)
+      val largeCode = code + " " * (WhiskProperties.getMaxActionSizeMB * FileUtils.ONE_MB).toInt
+      val tmpFile = File.createTempFile("whisk", ".js")
+      FileUtils.write(tmpFile, largeCode, StandardCharsets.UTF_8)
+      val result = action.create(name, Some(tmpFile.getAbsolutePath))
+      tmpFile.delete()
+      result
+    }
+
+    val hello = "hello"
+    val run = wsk.action.invoke(name, Map("payload" -> hello.toJson))
+    withActivation(wsk.activation, run) { activation =>
+      activation.response.status shouldBe "success"
+      activation.logs.get.mkString(" ") should include(s"hello, $hello")
+    }
+  }
+
 }

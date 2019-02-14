@@ -3,7 +3,7 @@
 ---
 # This role will run a CouchDB server on the db group
 
-- name: "Set the coordinator to the first node"
+- name: set the coordinator to the first node
   set_fact:
     coordinator: "{{ groups['db'][0] }}"
 
@@ -15,17 +15,21 @@
   fail: msg="The db provider in your {{ hosts_dir }}/group_vars/all is {{ db.provider }}, it has to be CouchDB, pls double check"
   when: db.provider != "CouchDB"
 
-- name: check for persistent disk
-  shell: df -h
-  register: disk_status
-  when: block_device is defined
+- name: ensure directory for persisting db exists
+  stat:
+    path: "{{ db.persist_path }}"
+  register: db_persist_path_exists
+  when: db.persist_path
 
-- name: "set the volume_dir"
-  vars:
-    instance: "{{instances | selectattr('name', 'equalto', 'db') | list | first}}"
+- name: fail if path to persist db does not exist
+  fail:
+    msg: directory for persisting db does not exist '{{ db.persist_path }}'
+  when: db.persist_path and not (db_persist_path_exists.stat.exists and db_persist_path_exists.stat.isdir)
+
+- name: "mount directory for persisting dbs"
   set_fact:
-    volumes: "{{ volumes }} + [ '{{ instance.volume.fsmount | default( '/mnt/' + group_names|first, true ) }}:/usr/local/var/lib/couchdb' ]"
-  when: (block_device is defined) and (block_device in disk_status.stdout)
+    volumes: "{{ volumes }} + [ '{{ db.persist_path }}:/opt/couchdb/data' ]"
+  when: db.persist_path
 
 - include_tasks: gen_erl_cookie.yml
   when: (db.instances|int >= 2)
@@ -53,6 +57,7 @@
       COUCHDB_USER: "{{ db.credentials.admin.user }}"
       COUCHDB_PASSWORD: "{{ db.credentials.admin.pass }}"
       NODENAME: "{{ ansible_host }}"
+      TZ: "{{ docker.timezone }}"
     pull: "{{ couchdb.pull_couchdb | default(true) }}"
 
 - name: wait until CouchDB in this host is up and running
@@ -63,7 +68,17 @@
   retries: 12
   delay: 5
 
-- name: create '_users' database for singleton mode
+- name: check if '_users' database exists
+  uri:
+    url: "{{ db.protocol }}://{{ ansible_host }}:{{ db.port }}/_users"
+    method: HEAD
+    status_code: 200,404
+    user: "{{ db.credentials.admin.user }}"
+    password: "{{ db.credentials.admin.pass }}"
+    force_basic_auth: yes
+  register: create_users_db
+
+- name: create '_users' database for singleton mode if necessary
   uri:
     url: "{{ db.protocol }}://{{ ansible_host }}:{{ db.port }}/_users"
     method: PUT
@@ -71,7 +86,7 @@
     user: "{{ db.credentials.admin.user }}"
     password: "{{ db.credentials.admin.pass }}"
     force_basic_auth: yes
-  when: (inventory_hostname == coordinator) and (couchdb.version|version_compare('2.0','>='))
+  when: (create_users_db.status == 404) and (inventory_hostname == coordinator) and (couchdb.version is version_compare('2.0','>='))
 
 - name: enable the cluster setup mode
   uri:

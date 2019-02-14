@@ -18,64 +18,50 @@
 package common.rest
 
 import java.io.{File, FileInputStream}
+import java.nio.charset.StandardCharsets
+import java.security.KeyStore
+import java.security.cert.X509Certificate
 import java.time.Instant
 import java.util.Base64
-import java.security.cert.X509Certificate
 
+import akka.actor.ActorSystem
+import akka.http.scaladsl.{Http, HttpsConnectionContext}
+import akka.http.scaladsl.model.HttpMethods.{DELETE, GET, POST, PUT}
+import akka.http.scaladsl.model.StatusCodes.{Accepted, NotFound, OK}
+import akka.http.scaladsl.model._
+import akka.http.scaladsl.model.Uri.{Path, Query}
+import akka.http.scaladsl.model.headers.{Authorization, BasicHttpCredentials, OAuth2BearerToken}
+import akka.stream.ActorMaterializer
+import akka.util.ByteString
+import com.typesafe.sslconfig.akka.AkkaSSLConfig
+import common.TestUtils.{ANY_ERROR_EXIT, DONTCARE_EXIT, RunResult, SUCCESS_EXIT}
+import common.{
+  DeleteFromCollectionOperations,
+  HasActivation,
+  ListOrGetFromCollectionOperations,
+  WaitFor,
+  WhiskProperties,
+  WskProps,
+  _
+}
+import javax.net.ssl._
 import org.apache.commons.io.{FileUtils, FilenameUtils}
+import org.apache.openwhisk.common.Https.HttpsConfig
+import org.apache.openwhisk.common.{AkkaLogging, TransactionId}
+import org.apache.openwhisk.core.entity.ByteSize
+import org.apache.openwhisk.utils.retry
 import org.scalatest.Matchers
 import org.scalatest.concurrent.ScalaFutures
 import org.scalatest.time.Span.convertDurationToSpan
+import pureconfig.loadConfigOrThrow
+import spray.json.DefaultJsonProtocol._
+import spray.json._
 
 import scala.collection.immutable.Seq
-import scala.concurrent.duration.Duration
-import scala.concurrent.duration.DurationInt
+import scala.concurrent.ExecutionContext
+import scala.concurrent.duration.{Duration, DurationInt, FiniteDuration}
 import scala.language.postfixOps
-import scala.util.Try
-import scala.util.{Failure, Success}
-import akka.http.scaladsl.model.StatusCode
-import akka.http.scaladsl.model.StatusCodes.Accepted
-import akka.http.scaladsl.model.StatusCodes.NotFound
-import akka.http.scaladsl.model.StatusCodes.OK
-import akka.http.scaladsl.model.HttpRequest
-import akka.http.scaladsl.model.HttpMethod
-import akka.http.scaladsl.model.HttpResponse
-import akka.http.scaladsl.model.headers.Authorization
-import akka.http.scaladsl.model.HttpEntity
-import akka.http.scaladsl.model.ContentTypes
-import akka.http.scaladsl.Http
-import akka.http.scaladsl.model.headers.BasicHttpCredentials
-import akka.http.scaladsl.model.Uri
-import akka.http.scaladsl.model.Uri.{Path, Query}
-import akka.http.scaladsl.model.HttpMethods.DELETE
-import akka.http.scaladsl.model.HttpMethods.GET
-import akka.http.scaladsl.model.HttpMethods.POST
-import akka.http.scaladsl.model.HttpMethods.PUT
-import akka.http.scaladsl.HttpsConnectionContext
-import akka.stream.ActorMaterializer
-import spray.json._
-import spray.json.DefaultJsonProtocol._
-import common._
-import common.DeleteFromCollectionOperations
-import common.ListOrGetFromCollectionOperations
-import common.HasActivation
-import common.TestUtils.SUCCESS_EXIT
-import common.TestUtils.ANY_ERROR_EXIT
-import common.TestUtils.DONTCARE_EXIT
-import common.TestUtils.RunResult
-import common.WaitFor
-import common.WhiskProperties
-import common.WskProps
-import whisk.core.entity.ByteSize
-import whisk.utils.retry
-import javax.net.ssl._
-import com.typesafe.sslconfig.akka.AkkaSSLConfig
-import java.nio.charset.StandardCharsets
-import java.security.KeyStore
-
-import akka.actor.ActorSystem
-import pureconfig.loadConfigOrThrow
-import whisk.common.Https.HttpsConfig
+import scala.util.{Failure, Success, Try}
 
 class AcceptAllHostNameVerifier extends HostnameVerifier {
   override def verify(s: String, sslSession: SSLSession): Boolean = true
@@ -83,7 +69,7 @@ class AcceptAllHostNameVerifier extends HostnameVerifier {
 
 object SSL {
 
-  lazy val httpsConfig = loadConfigOrThrow[HttpsConfig]("whisk.controller.https")
+  lazy val httpsConfig: HttpsConfig = loadConfigOrThrow[HttpsConfig]("whisk.controller.https")
 
   def keyManagers(clientAuth: Boolean): Array[KeyManager] = {
     if (clientAuth)
@@ -104,8 +90,8 @@ object SSL {
 
   def nonValidatingContext(clientAuth: Boolean = false): SSLContext = {
     class IgnoreX509TrustManager extends X509TrustManager {
-      def checkClientTrusted(chain: Array[X509Certificate], authType: String) = ()
-      def checkServerTrusted(chain: Array[X509Certificate], authType: String) = ()
+      def checkClientTrusted(chain: Array[X509Certificate], authType: String): Unit = ()
+      def checkServerTrusted(chain: Array[X509Certificate], authType: String): Unit = ()
       def getAcceptedIssuers: Array[X509Certificate] = Array.empty
     }
 
@@ -115,7 +101,7 @@ object SSL {
     context
   }
 
-  def httpsConnectionContext(implicit system: ActorSystem) = {
+  def httpsConnectionContext(implicit system: ActorSystem): HttpsConnectionContext = {
     val sslConfig = AkkaSSLConfig().mapSettings { s =>
       s.withHostnameVerifierClass(classOf[AcceptAllHostNameVerifier].asInstanceOf[Class[HostnameVerifier]])
     }
@@ -132,7 +118,7 @@ object HttpConnection {
    * @param system actor system
    * @return https connection context
    */
-  def getContext(protocol: String)(implicit system: ActorSystem) = {
+  def getContext(protocol: String)(implicit system: ActorSystem): HttpsConnectionContext = {
     if (protocol == "https") {
       SSL.httpsConnectionContext
     } else {
@@ -143,13 +129,13 @@ object HttpConnection {
 }
 
 class WskRestOperations(implicit actorSytem: ActorSystem) extends WskOperations {
-  override implicit val action = new RestActionOperations
-  override implicit val trigger = new RestTriggerOperations
-  override implicit val rule = new RestRuleOperations
-  override implicit val activation = new RestActivationOperations
-  override implicit val pkg = new RestPackageOperations
-  override implicit val namespace = new RestNamespaceOperations
-  override implicit val api = new RestGatewayOperations
+  override implicit val action: RestActionOperations = new RestActionOperations
+  override implicit val trigger: RestTriggerOperations = new RestTriggerOperations
+  override implicit val rule: RestRuleOperations = new RestRuleOperations
+  override implicit val activation: RestActivationOperations = new RestActivationOperations
+  override implicit val pkg: RestPackageOperations = new RestPackageOperations
+  override implicit val namespace: RestNamespaceOperations = new RestNamespaceOperations
+  override implicit val api: RestGatewayOperations = new RestGatewayOperations
 }
 
 trait RestListOrGetFromCollectionOperations extends ListOrGetFromCollectionOperations with RunRestCmd {
@@ -177,7 +163,7 @@ trait RestListOrGetFromCollectionOperations extends ListOrGetFromCollectionOpera
       limit.map(l => Map("limit" -> l.toString)).getOrElse(Map.empty)
 
     val resp = requestEntity(GET, entPath, paramMap)
-    val r = new RestResult(resp.status, getRespData(resp))
+    val r = new RestResult(resp.status, getTransactionId(resp), getRespData(resp))
     validateStatusCode(expectedExitCode, r.statusCode.intValue)
     r
   }
@@ -199,7 +185,7 @@ trait RestListOrGetFromCollectionOperations extends ListOrGetFromCollectionOpera
     val (ns, entity) = getNamespaceEntityName(name)
     val entPath = Path(s"$basePath/namespaces/$ns/$noun/$entity")
     val resp = requestEntity(GET, entPath)(wp)
-    val rr = new RestResult(resp.status, getRespData(resp))
+    val rr = new RestResult(resp.status, getTransactionId(resp), getRespData(resp))
     validateStatusCode(expectedExitCode, rr.statusCode.intValue)
     rr
   }
@@ -218,7 +204,7 @@ trait RestDeleteFromCollectionOperations extends DeleteFromCollectionOperations 
     val (ns, entityName) = getNamespaceEntityName(name)
     val path = Path(s"$basePath/namespaces/$ns/$noun/$entityName")
     val resp = requestEntity(DELETE, path)(wp)
-    val rr = new RestResult(resp.status, getRespData(resp))
+    val rr = new RestResult(resp.status, getTransactionId(resp), getRespData(resp))
     validateStatusCode(expectedExitCode, rr.statusCode.intValue)
     rr
   }
@@ -282,6 +268,7 @@ class RestActionOperations(implicit val actorSystem: ActorSystem)
     timeout: Option[Duration] = None,
     memory: Option[ByteSize] = None,
     logsize: Option[ByteSize] = None,
+    concurrency: Option[Int] = None,
     shared: Option[Boolean] = None,
     update: Boolean = false,
     web: Option[String] = None,
@@ -298,20 +285,17 @@ class RestActionOperations(implicit val actorSystem: ActorSystem)
             val actionName = entityName(artifact.get)
             val actionPath = Path(s"$basePath/namespaces/$namespace/$noun/$actionName")
             val resp = requestEntity(GET, actionPath)
-            if (resp == None) return new RestResult(NotFound) // NOTE return, aborts the method
-            else {
-              val result = new RestResult(resp.status, getRespData(resp))
-              val params = result.getFieldListJsObject("parameters").toArray[JsValue]
-              val annos = result.getFieldListJsObject("annotations").toArray[JsValue]
-              val exec = result.getFieldJsObject("exec").fields
-              (paramsInput ++ params, annosInput ++ annos, exec)
-            }
+            val result = new RestResult(resp.status, getTransactionId(resp), getRespData(resp))
+            val params = result.getFieldListJsObject("parameters").toArray[JsValue]
+            val annos = result.getFieldListJsObject("annotations").toArray[JsValue]
+            val exec = result.getFieldJsObject("exec").fields
+            (paramsInput ++ params, annosInput ++ annos, exec)
 
           case "sequence" =>
             require(artifact.isDefined, "sequence requires a component list")
             val comps = convertIntoComponents(artifact.get)
             val exec =
-              if (comps.size > 0) Map("components" -> comps.toJson, "kind" -> k.toJson)
+              if (comps.nonEmpty) Map("components" -> comps.toJson, "kind" -> k.toJson)
               else Map("kind" -> k.toJson)
             (paramsInput, annosInput, exec)
 
@@ -359,7 +343,8 @@ class RestActionOperations(implicit val actorSystem: ActorSystem)
     val limits: Map[String, JsValue] = {
       timeout.map(t => Map("timeout" -> t.toMillis.toJson)).getOrElse(Map.empty) ++
         logsize.map(log => Map("logs" -> log.toMB.toJson)).getOrElse(Map.empty) ++
-        memory.map(m => Map("memory" -> m.toMB.toJson)).getOrElse(Map.empty)
+        memory.map(m => Map("memory" -> m.toMB.toJson)).getOrElse(Map.empty) ++
+        concurrency.map(c => Map("concurrency" -> c.toJson)).getOrElse(Map.empty)
     }
 
     val body: Map[String, JsValue] = if (!update) {
@@ -372,9 +357,9 @@ class RestActionOperations(implicit val actorSystem: ActorSystem)
       var content: Map[String, JsValue] = Map.empty
       if (exec.nonEmpty)
         content = Map("exec" -> main.map(m => exec ++ Map("main" -> m.toJson)).getOrElse(exec).toJson)
-      if (params.length > 0)
+      if (params.nonEmpty)
         content = content + ("parameters" -> params.toJson)
-      if (annos.length > 0)
+      if (annos.nonEmpty)
         content = content + ("annotations" -> annos.toJson)
       if (limits.nonEmpty)
         content = content + ("limits" -> limits.toJson)
@@ -385,7 +370,7 @@ class RestActionOperations(implicit val actorSystem: ActorSystem)
     val resp =
       if (update) requestEntity(PUT, path, Map("overwrite" -> "true"), Some(JsObject(body).toString))
       else requestEntity(PUT, path, body = Some(JsObject(body).toString))
-    val rr = new RestResult(resp.status, getRespData(resp))
+    val rr = new RestResult(resp.status, getTransactionId(resp), getRespData(resp))
     validateStatusCode(expectedExitCode, rr.statusCode.intValue)
     rr
   }
@@ -452,11 +437,11 @@ class RestTriggerOperations(implicit val actorSystem: ActorSystem)
       }
 
       val inputParams = convertMapIntoKeyValue(parameters)
-      if (inputParams.size > 0) {
+      if (inputParams.nonEmpty) {
         bodyContent = bodyContent + ("parameters" -> params.toJson)
       }
       val inputAnnos = convertMapIntoKeyValue(annotations)
-      if (inputAnnos.size > 0) {
+      if (inputAnnos.nonEmpty) {
         bodyContent = bodyContent + ("annotations" -> annos.toJson)
       }
     }
@@ -464,10 +449,9 @@ class RestTriggerOperations(implicit val actorSystem: ActorSystem)
     val resp =
       if (update) requestEntity(PUT, path, Map("overwrite" -> "true"), Some(JsObject(bodyContent).toString))
       else requestEntity(PUT, path, body = Some(JsObject(bodyContent).toString))
-    val result = new RestResult(resp.status, getRespData(resp))
+    val result = new RestResult(resp.status, getTransactionId(resp), getRespData(resp))
     if (result.statusCode != OK) {
       validateStatusCode(expectedExitCode, result.statusCode.intValue)
-      result
     }
     val rr = feed map { f =>
       // Invoke the feed
@@ -480,13 +464,13 @@ class RestTriggerOperations(implicit val actorSystem: ActorSystem)
         "authKey" -> s"${wp.authKey}".toJson)
       body = body ++ parameters
       val resp = requestEntity(POST, path, paramMap, Some(body.toJson.toString))
-      val resultInvoke = new RestResult(resp.status, getRespData(resp))
+      val resultInvoke = new RestResult(resp.status, getTransactionId(resp), getRespData(resp))
       if ((expectedExitCode != DONTCARE_EXIT) && (expectedExitCode != ANY_ERROR_EXIT))
         expectedExitCode shouldBe resultInvoke.statusCode.intValue
       if (resultInvoke.statusCode != OK) {
         // Remove the trigger, because the feed failed to invoke.
         delete(triggerName)
-        new RestResult(NotFound)
+        new RestResult(NotFound, getTransactionId(resp))
       } else {
         result
       }
@@ -514,9 +498,9 @@ class RestTriggerOperations(implicit val actorSystem: ActorSystem)
       input.parseJson.convertTo[Map[String, JsValue]]
     } getOrElse parameters
     val resp =
-      if (params.size == 0) requestEntity(POST, path)
+      if (params.isEmpty) requestEntity(POST, path)
       else requestEntity(POST, path, body = Some(params.toJson.toString))
-    new RestResult(resp.status.intValue, getRespData(resp))
+    new RestResult(resp.status.intValue, getTransactionId(resp), getRespData(resp))
   }
 }
 
@@ -557,7 +541,7 @@ class RestRuleOperations(implicit val actorSystem: ActorSystem)
     val resp =
       if (update) requestEntity(PUT, path, Map("overwrite" -> "true"), Some(bodyContent.toString))
       else requestEntity(PUT, path, body = Some(bodyContent.toString))
-    new RestResult(resp.status, getRespData(resp))
+    new RestResult(resp.status, getTransactionId(resp), getRespData(resp))
   }
 
   /**
@@ -568,7 +552,7 @@ class RestRuleOperations(implicit val actorSystem: ActorSystem)
    * if the code is anything but DONTCARE_EXIT, assert the code is as expected
    */
   override def enable(name: String, expectedExitCode: Int = SUCCESS_EXIT)(implicit wp: WskProps): RestResult = {
-    changeRuleState(name, "active")
+    changeRuleState(name)
   }
 
   /**
@@ -598,7 +582,7 @@ class RestRuleOperations(implicit val actorSystem: ActorSystem)
     val path = getNamePath(wp.namespace, noun, enName)
     val bodyContent = JsObject("status" -> state.toJson)
     val resp = requestEntity(POST, path, body = Some(bodyContent.toString))
-    new RestResult(resp.status, getRespData(resp))
+    new RestResult(resp.status, getTransactionId(resp), getRespData(resp))
   }
 }
 
@@ -622,7 +606,7 @@ class RestActivationOperations(implicit val actorSystem: ActorSystem)
                        actionName: Option[String] = None)(implicit wp: WskProps): RestResult = {
     require(duration > 1.second, "duration must be at least 1 second")
     val sinceTime = {
-      val now = System.currentTimeMillis()
+      val now = System.currentTimeMillis
       since.map(s => now - s.toMillis).getOrElse(now)
     }
 
@@ -644,15 +628,17 @@ class RestActivationOperations(implicit val actorSystem: ActorSystem)
   def listActivation(filter: Option[String] = None,
                      limit: Option[Int] = None,
                      since: Option[Instant] = None,
+                     skip: Option[Int] = None,
                      docs: Boolean = true,
                      expectedExitCode: Int = SUCCESS_EXIT)(implicit wp: WskProps): RestResult = {
-    val entityPath = Path(s"${basePath}/namespaces/${wp.namespace}/$noun")
-    val paramMap = Map("skip" -> "0", "docs" -> docs.toString) ++
+    val entityPath = Path(s"$basePath/namespaces/${wp.namespace}/$noun")
+    val paramMap = Map("docs" -> docs.toString) ++
+      skip.map(s => Map("skip" -> s.toString)).getOrElse(Map.empty) ++
       limit.map(l => Map("limit" -> l.toString)).getOrElse(Map.empty) ++
       filter.map(f => Map("name" -> f.toString)).getOrElse(Map.empty) ++
       since.map(s => Map("since" -> s.toEpochMilli.toString)).getOrElse(Map.empty)
     val resp = requestEntity(GET, entityPath, paramMap)
-    new RestResult(resp.status, getRespData(resp))
+    new RestResult(resp.status, getTransactionId(resp), getRespData(resp))
   }
 
   /**
@@ -673,9 +659,9 @@ class RestActivationOperations(implicit val actorSystem: ActorSystem)
    * if the code is anything but DONTCARE_EXIT, assert the code is as expected
    */
   def activationLogs(activationId: String, expectedExitCode: Int = OK.intValue)(implicit wp: WskProps): RestResult = {
-    val path = Path(s"${basePath}/namespaces/${wp.namespace}/$noun/$activationId/logs")
+    val path = Path(s"$basePath/namespaces/${wp.namespace}/$noun/$activationId/logs")
     val resp = requestEntity(GET, path)
-    val rr = new RestResult(resp.status, getRespData(resp))
+    val rr = new RestResult(resp.status, getTransactionId(resp), getRespData(resp))
     validateStatusCode(expectedExitCode, rr.statusCode.intValue)
     rr
   }
@@ -688,9 +674,9 @@ class RestActivationOperations(implicit val actorSystem: ActorSystem)
    * if the code is anything but DONTCARE_EXIT, assert the code is as expected
    */
   def activationResult(activationId: String, expectedExitCode: Int = OK.intValue)(implicit wp: WskProps): RestResult = {
-    val path = Path(s"${basePath}/namespaces/${wp.namespace}/$noun/$activationId/result")
+    val path = Path(s"$basePath/namespaces/${wp.namespace}/$noun/$activationId/result")
     val resp = requestEntity(GET, path)
-    val rr = new RestResult(resp.status, getRespData(resp))
+    val rr = new RestResult(resp.status, getTransactionId(resp), getRespData(resp))
     validateStatusCode(expectedExitCode, rr.statusCode.intValue)
     rr
   }
@@ -706,6 +692,7 @@ class RestActivationOperations(implicit val actorSystem: ActorSystem)
    * @param entity the name of the entity to filter from activation list
    * @param limit the maximum number of entities to list (if entity name is not unique use Some(0))
    * @param since (optional) only the activations since this timestamp are included
+   * @param skip (optional) the number of activations to skip
    * @param retries the maximum retries (total timeout is retries + 1 seconds)
    * @return activation ids found, caller must check length of sequence
    */
@@ -713,11 +700,13 @@ class RestActivationOperations(implicit val actorSystem: ActorSystem)
                        entity: Option[String],
                        limit: Option[Int] = Some(30),
                        since: Option[Instant] = None,
+                       skip: Option[Int] = Some(0),
                        retries: Int = 10,
                        pollPeriod: Duration = 1.second)(implicit wp: WskProps): Seq[String] = {
     Try {
       retry({
-        val result = idsActivation(listActivation(filter = entity, limit = limit, since = since, docs = false))
+        val result =
+          idsActivation(listActivation(filter = entity, limit = limit, since = since, skip = skip, docs = false))
         if (result.length >= N) result else throw PartialResult(result)
       }, retries, waitBeforeRetry = Some(pollPeriod))
     } match {
@@ -732,13 +721,22 @@ class RestActivationOperations(implicit val actorSystem: ActorSystem)
                    fieldFilter: Option[String] = None,
                    last: Option[Boolean] = None,
                    summary: Option[Boolean] = None)(implicit wp: WskProps): RestResult = {
-    val rr = activationId match {
+    val actId = activationId match {
+      case Some(_) => activationId
+      case None =>
+        last match {
+          case Some(true) =>
+            val activations = pollFor(N = 1, entity = None, limit = Some(1))
+            require(activations.size <= 1)
+            activations.headOption
+          case _ => None
+        }
+    }
+    val rr = actId match {
       case Some(id) =>
         val resp = requestEntity(GET, getNamePath(wp.namespace, noun, id))
-        new RestResult(resp.status, getRespData(resp))
-
-      case None =>
-        new RestResult(NotFound)
+        new RestResult(resp.status, getTransactionId(resp), getRespData(resp))
+      case None => new RestResult(NotFound, "")
     }
     validateStatusCode(expectedExitCode, rr.statusCode.intValue)
     rr
@@ -776,10 +774,10 @@ class RestActivationOperations(implicit val actorSystem: ActorSystem)
     val rr = activationId match {
       case Some(id) =>
         val resp = requestEntity(GET, getNamePath(wp.namespace, noun, s"$id/logs"))
-        new RestResult(resp.status, getRespData(resp))
+        new RestResult(resp.status, getTransactionId(resp), getRespData(resp))
 
       case None =>
-        new RestResult(NotFound)
+        new RestResult(NotFound, "")
     }
     validateStatusCode(expectedExitCode, rr.statusCode.intValue)
     rr
@@ -791,10 +789,10 @@ class RestActivationOperations(implicit val actorSystem: ActorSystem)
     val rr = activationId match {
       case Some(id) =>
         val resp = requestEntity(GET, getNamePath(wp.namespace, noun, s"$id/result"))
-        new RestResult(resp.status, getRespData(resp))
+        new RestResult(resp.status, getTransactionId(resp), getRespData(resp))
 
       case None =>
-        new RestResult(NotFound)
+        new RestResult(NotFound, "")
     }
     validateStatusCode(expectedExitCode, rr.statusCode.intValue)
     rr
@@ -818,7 +816,7 @@ class RestNamespaceOperations(implicit val actorSystem: ActorSystem) extends Nam
     implicit wp: WskProps): RestResult = {
     val entPath = Path(s"$basePath/namespaces")
     val resp = requestEntity(GET, entPath)
-    val result = if (resp == None) new RestResult(NotFound) else new RestResult(resp.status, getRespData(resp))
+    val result = new RestResult(resp.status, getTransactionId(resp), getRespData(resp))
     validateStatusCode(expectedExitCode, result.statusCode.intValue)
     result
   }
@@ -831,7 +829,7 @@ class RestNamespaceOperations(implicit val actorSystem: ActorSystem) extends Nam
    */
   override def whois()(implicit wskprops: WskProps): String = {
     val ns = list().getBodyListString
-    if (ns.size > 0) ns(0).toString else ""
+    ns.headOption.map(_.toString).getOrElse("")
   }
 }
 
@@ -870,11 +868,11 @@ class RestPackageOperations(implicit val actorSystem: ActorSystem)
       }
 
       val inputParams = convertMapIntoKeyValue(parameters)
-      if (inputParams.size > 0) {
+      if (inputParams.nonEmpty) {
         bodyContent = bodyContent + ("parameters" -> params.toJson)
       }
       val inputAnnos = convertMapIntoKeyValue(annotations)
-      if (inputAnnos.size > 0) {
+      if (inputAnnos.nonEmpty) {
         bodyContent = bodyContent + ("annotations" -> annos.toJson)
       }
     }
@@ -882,7 +880,7 @@ class RestPackageOperations(implicit val actorSystem: ActorSystem)
     val resp =
       if (update) requestEntity(PUT, path, Map("overwrite" -> "true"), Some(JsObject(bodyContent).toString))
       else requestEntity(PUT, path, body = Some(JsObject(bodyContent).toString))
-    val r = new RestResult(resp.status, getRespData(resp))
+    val r = new RestResult(resp.status, getTransactionId(resp), getRespData(resp))
     validateStatusCode(expectedExitCode, r.statusCode.intValue)
     r
   }
@@ -908,7 +906,7 @@ class RestPackageOperations(implicit val actorSystem: ActorSystem)
     val bodyContent =
       JsObject("binding" -> binding.toJson, "parameters" -> params.toJson, "annotations" -> annos.toJson)
     val resp = requestEntity(PUT, path, Map("overwrite" -> "false"), Some(bodyContent.toString))
-    val rr = new RestResult(resp.status, getRespData(resp))
+    val rr = new RestResult(resp.status, getTransactionId(resp), getRespData(resp))
     validateStatusCode(expectedExitCode, rr.statusCode.intValue)
     rr
   }
@@ -985,17 +983,18 @@ class RestGatewayOperations(implicit val actorSystem: ActorSystem) extends Gatew
           web = true,
           expectedExitCode = expectedExitCode)(wp)
       }
-      case None => {
+      case None =>
         swagger match {
-          case Some(swaggerFile) => {
+          case Some(swaggerFile) =>
             var file = ""
             val fileName = swaggerFile.toString
             try {
               file = FileUtils.readFileToString(new File(fileName), StandardCharsets.UTF_8)
             } catch {
-              case e: Throwable =>
+              case _: Throwable =>
                 return new RestResult(
                   NotFound,
+                  "",
                   JsObject("error" -> s"Error reading swagger file '$fileName'".toJson).toString)
             }
             val parms = Map("namespace" -> s"${wp.namespace}".toJson, "swagger" -> file.toJson)
@@ -1013,12 +1012,8 @@ class RestGatewayOperations(implicit val actorSystem: ActorSystem) extends Gatew
               result = true,
               web = true,
               expectedExitCode = expectedExitCode)(wp)
-          }
-          case None => {
-            new RestResult(NotFound)
-          }
+          case None => new RestResult(NotFound, "")
         }
-      }
     }
     r
   }
@@ -1132,21 +1127,23 @@ class RestGatewayOperations(implicit val actorSystem: ActorSystem) extends Gatew
   }
 }
 
-trait RunRestCmd extends Matchers with ScalaFutures {
+trait RunRestCmd extends Matchers with ScalaFutures with SwaggerValidator {
 
-  val protocol = loadConfigOrThrow[String]("whisk.controller.protocol")
-  val idleTimeout = 90 seconds
+  val protocol: String = loadConfigOrThrow[String]("whisk.controller.protocol")
+  val idleTimeout: FiniteDuration = 90 seconds
+  val toStrictTimeout: FiniteDuration = 5 seconds
   val queueSize = 10
   val maxOpenRequest = 1024
   val basePath = Path("/api/v1")
   val systemNamespace = "whisk.system"
+  val logger = new AkkaLogging(actorSystem.log)
 
-  implicit val config = PatienceConfig(100 seconds, 15 milliseconds)
+  implicit val config: PatienceConfig = PatienceConfig(100 seconds, 15 milliseconds)
   implicit val actorSystem: ActorSystem
-  lazy implicit val executionContext = actorSystem.dispatcher
-  lazy implicit val materializer = ActorMaterializer()
+  lazy implicit val executionContext: ExecutionContext = actorSystem.dispatcher
+  lazy implicit val materializer: ActorMaterializer = ActorMaterializer()
 
-  lazy val sslConfig = AkkaSSLConfig().mapSettings {
+  lazy val sslConfig: AkkaSSLConfig = AkkaSSLConfig().mapSettings {
     _.withHostnameVerifierClass(classOf[AcceptAllHostNameVerifier].asInstanceOf[Class[HostnameVerifier]])
   }
 
@@ -1167,14 +1164,14 @@ trait RunRestCmd extends Matchers with ScalaFutures {
 
   def getNamePath(ns: String, noun: String, name: String) = Path(s"$basePath/namespaces/$ns/$noun/$name")
 
-  def getExt(filePath: String) = Option(FilenameUtils.getExtension(filePath)).getOrElse("")
+  def getExt(filePath: String): String = Option(FilenameUtils.getExtension(filePath)).getOrElse("")
 
   def requestEntity(method: HttpMethod,
                     path: Path,
                     params: Map[String, String] = Map.empty,
                     body: Option[String] = None)(implicit wp: WskProps): HttpResponse = {
 
-    val creds = getBasicHttpCredentials(wp)
+    val creds = getHttpCredentials(wp)
 
     // startsWith(http) includes https
     val hostWithScheme = if (wp.apihost.startsWith("http")) {
@@ -1187,16 +1184,32 @@ trait RunRestCmd extends Matchers with ScalaFutures {
       method,
       hostWithScheme.withPath(path).withQuery(Query(params)),
       List(Authorization(creds)),
-      entity = body.map(b => HttpEntity(ContentTypes.`application/json`, b)).getOrElse(HttpEntity.Empty))
-    Http().singleRequest(request, connectionContext).futureValue
+      entity =
+        body.map(b => HttpEntity.Strict(ContentTypes.`application/json`, ByteString(b))).getOrElse(HttpEntity.Empty))
+    val response = Http().singleRequest(request, connectionContext).flatMap { _.toStrict(toStrictTimeout) }.futureValue
+
+    logger.debug(this, s"Request: $request")
+    logger.debug(this, s"Response: $response")
+
+    val validationErrors = validateRequestAndResponse(request, response)
+    if (validationErrors.nonEmpty) {
+      fail(
+        s"HTTP request or response did not match the Swagger spec.\nRequest: $request\n" +
+          s"Response: $response\nValidation Error: $validationErrors")
+    }
+    response
   }
 
-  private def getBasicHttpCredentials(wp: WskProps): BasicHttpCredentials = {
+  private def getHttpCredentials(wp: WskProps) = {
     if (wp.authKey.contains(":")) {
       val authKey = wp.authKey.split(":")
       new BasicHttpCredentials(authKey(0), authKey(1))
     } else {
-      new BasicHttpCredentials(wp.authKey, wp.authKey)
+      if (wp.basicAuth) {
+        new BasicHttpCredentials(wp.authKey, wp.authKey)
+      } else {
+        OAuth2BearerToken(wp.authKey)
+      }
     }
   }
 
@@ -1263,7 +1276,7 @@ trait RunRestCmd extends Matchers with ScalaFutures {
       .toArray
   }
 
-  def entityName(name: String)(implicit wp: WskProps) = {
+  def entityName(name: String)(implicit wp: WskProps): String = {
     val sep = "/"
     if (name.startsWith(sep)) name.substring(name.indexOf(sep, name.indexOf(sep) + 1) + 1, name.length)
     else name
@@ -1280,8 +1293,17 @@ trait RunRestCmd extends Matchers with ScalaFutures {
   }
 
   def getRespData(resp: HttpResponse): String = {
-    val timeout = 5.seconds
+    val timeout = toStrictTimeout
     Try(resp.entity.toStrict(timeout).map { _.data }.map(_.utf8String).futureValue).getOrElse("")
+  }
+
+  def getTransactionId(resp: HttpResponse): String = {
+    val tidHeader = resp.headers.find(_.is(TransactionId.generatorConfig.lowerCaseHeader))
+    withClue(
+      s"The header ${TransactionId.generatorConfig} is not set. This means that the request did not reach nginx (or the controller if nginx is skipped in that test).") {
+      tidHeader shouldBe defined
+    }
+    tidHeader.get.value
   }
 
   def getNamespaceEntityName(name: String)(implicit wp: WskProps): (String, String) = {
@@ -1323,7 +1345,7 @@ trait RunRestCmd extends Matchers with ScalaFutures {
 
     val resp = requestEntity(POST, path, paramMap, input)
 
-    val rr = new RestResult(resp.status.intValue, getRespData(resp), blocking)
+    val rr = new RestResult(resp.status.intValue, getTransactionId(resp), getRespData(resp), blocking)
 
     // If the statusCode does not not equal to expectedExitCode, it is acceptable that the statusCode
     // equals to 200 for the case that either blocking or result is set to true.
@@ -1349,7 +1371,7 @@ object RestResult {
   }
 
   def getFieldJsValue(obj: JsObject, key: String): JsValue = {
-    obj.fields.get(key).getOrElse(JsObject.empty)
+    obj.fields.getOrElse(key, JsObject.empty)
   }
 
   def getFieldListJsObject(obj: JsObject, key: String): Vector[JsObject] = {
@@ -1366,7 +1388,7 @@ object RestResult {
   }
 }
 
-class RestResult(var statusCode: StatusCode, var respData: String = "", blocking: Boolean = false)
+class RestResult(val statusCode: StatusCode, val tid: String, val respData: String = "", blocking: Boolean = false)
     extends RunResult(
       RestResult.convertStausCodeToExitCode(statusCode, blocking),
       respData,
@@ -1374,6 +1396,7 @@ class RestResult(var statusCode: StatusCode, var respData: String = "", blocking
 
   override def toString: String = {
     super.toString + s"""statusCode: $statusCode
+       |tid: $tid
        |respData: $respData
        |blocking: $blocking""".stripMargin
   }
@@ -1396,21 +1419,21 @@ class RestResult(var statusCode: StatusCode, var respData: String = "", blocking
     RestResult.getFieldListJsObject(respBody, key)
   }
 
-  def getBodyListJsObject(): Vector[JsObject] = {
+  def getBodyListJsObject: Vector[JsObject] = {
     respData.parseJson.convertTo[Vector[JsObject]]
   }
 
-  def getBodyListString(): Vector[String] = {
+  def getBodyListString: Vector[String] = {
     respData.parseJson.convertTo[Vector[String]]
   }
 }
 
-class ApiAction(var name: String,
-                var namespace: String,
-                var backendMethod: String = "POST",
-                var backendUrl: String,
-                var authkey: String) {
-  def toJson() = {
+class ApiAction(val name: String,
+                val namespace: String,
+                val backendMethod: String = "POST",
+                val backendUrl: String,
+                val authkey: String) {
+  def toJson: JsObject = {
     JsObject(
       "name" -> name.toJson,
       "namespace" -> namespace.toJson,

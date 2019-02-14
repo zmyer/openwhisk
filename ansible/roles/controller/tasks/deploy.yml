@@ -27,6 +27,15 @@
     mode: 0777
   become: "{{ logs.dir.become }}"
 
+# We need to create the file with proper permissions because the dir creation above
+# does not result in a dir with full permissions in docker machine especially with macos mounts
+- name: ensure controller log file is created with permissions
+  file:
+    path: "{{ whisk_logs_dir }}/{{ controller_name }}/{{ controller_name }}_logs.log"
+    state: touch
+    mode: 0777
+  when: environment_type is defined and environment_type == "docker-machine"
+
 - name: ensure controller config directory is created with permissions
   file:
     path: "{{ controller.confdir }}/{{ controller_name }}"
@@ -58,7 +67,7 @@
 - name: copy nginx certificate keystore
   when: controller.protocol == 'https'
   copy:
-    src: files/{{ controllerKeystoreName }}
+    src: files/{{ controller.ssl.keystore.name }}
     mode: 0666
     dest: "{{ controller.confdir }}/{{ controller_name }}"
   become: "{{ controller.dir.become }}"
@@ -123,8 +132,8 @@
       "CONTROLLER_INSTANCES": "{{ controller.instances }}"
       "JMX_REMOTE": "{{ jmx.enabled }}"
 
-      "COMPONENT_NAME": "{{ controller_name }}"
-      "PORT": 8080
+      "PORT": "8080"
+      "TZ": "{{ docker.timezone }}"
 
       "CONFIG_whisk_info_date": "{{ whisk.version.date }}"
       "CONFIG_whisk_info_buildNo": "{{ docker.image.tag }}"
@@ -174,7 +183,7 @@
       "CONFIG_whisk_db_actionsDdoc": "{{ db_whisk_actions_ddoc | default() }}"
       "CONFIG_whisk_db_activationsDdoc": "{{ db_whisk_activations_ddoc | default() }}"
       "CONFIG_whisk_db_activationsFilterDdoc": "{{ db_whisk_activations_filter_ddoc | default() }}"
-      "CONFIG_whisk_userEvents_enabled": "{{ user_events }}"
+      "CONFIG_whisk_userEvents_enabled": "{{ user_events | default(false) | string }}"
 
       "LIMITS_ACTIONS_INVOKES_PERMINUTE": "{{ limits.invocationsPerMinute }}"
       "LIMITS_ACTIONS_INVOKES_CONCURRENT": "{{ limits.concurrentInvocations }}"
@@ -189,6 +198,10 @@
       "CONFIG_whisk_timeLimit_max": "{{ limit_action_time_max | default() }}"
       "CONFIG_whisk_timeLimit_std": "{{ limit_action_time_std | default() }}"
 
+      "CONFIG_whisk_concurrencyLimit_min": "{{ limit_action_concurrency_min | default() }}"
+      "CONFIG_whisk_concurrencyLimit_max": "{{ limit_action_concurrency_max | default() }}"
+      "CONFIG_whisk_concurrencyLimit_std": "{{ limit_action_concurrency_std | default() }}"
+
       "CONFIG_whisk_activation_payload_max":
         "{{ limit_activation_payload | default() }}"
 
@@ -198,30 +211,24 @@
       "CONFIG_whisk_runtimes_defaultImageTag":
         "{{ runtimes_default_image_tag | default() }}"
       "CONFIG_whisk_runtimes_bypassPullForLocalImages":
-        "{{ runtimes_bypass_pull_for_local_images | default() }}"
+        "{{ runtimes_bypass_pull_for_local_images | default() | string }}"
       "CONFIG_whisk_runtimes_localImagePrefix":
         "{{ runtimes_local_image_prefix | default() }}"
 
-      "METRICS_KAMON": "{{ metrics.kamon.enabled }}"
-      "METRICS_KAMON_TAGS": "{{ metrics.kamon.tags }}"
-      "METRICS_LOG": "{{ metrics.log.enabled }}"
+      "METRICS_KAMON": "{{ metrics.kamon.enabled | default(false) | string }}"
+      "METRICS_KAMON_TAGS": "{{ metrics.kamon.tags | default() | string }}"
+      "METRICS_LOG": "{{ metrics.log.enabled | default(false) | string }}"
       "CONFIG_whisk_controller_protocol": "{{ controller.protocol }}"
       "CONFIG_whisk_controller_https_keystorePath":
-        "{{ controller.ssl.keystore.path }}"
+        "/conf/{{ controller.ssl.keystore.name }}"
       "CONFIG_whisk_controller_https_keystorePassword":
         "{{ controller.ssl.keystore.password }}"
       "CONFIG_whisk_controller_https_keystoreFlavor":
         "{{ controller.ssl.storeFlavor }}"
-      "CONFIG_whisk_controller_https_truststorePath":
-        "{{ controller.ssl.truststore.path }}"
-      "CONFIG_whisk_controller_https_truststorePassword":
-        "{{ controller.ssl.truststore.password }}"
-      "CONFIG_whisk_controller_https_truststoreFlavor":
-        "{{ controller.ssl.storeFlavor }}"
       "CONFIG_whisk_controller_https_clientAuth":
         "{{ controller.ssl.clientAuth }}"
-      "CONFIG_whisk_loadbalancer_invokerBusyThreshold":
-        "{{ invoker.busyThreshold }}"
+      "CONFIG_whisk_loadbalancer_managedFraction":
+        "{{ controller.managedFraction }}"
       "CONFIG_whisk_loadbalancer_blackboxFraction":
         "{{ controller.blackboxFraction }}"
       "CONFIG_whisk_loadbalancer_timeoutFactor":
@@ -240,28 +247,64 @@
 
       "CONFIG_whisk_transactions_header": "{{ transactions.header }}"
 
+      "CONFIG_whisk_controller_activation_pollingFromDb": "{{ controller_activation_pollingFromDb | default(true) | string }}"
+
 - name: merge extra env variables
   set_fact:
     env: "{{ env | combine(controller.extraEnv) }}"
 
+- name: populate volumes for controller
+  set_fact:
+    controller_volumes:
+       - "{{ whisk_logs_dir }}/{{ controller_name }}:/logs"
+       - "{{ controller.confdir }}/{{ controller_name }}:/conf"
+
+- name: check if coverage collection is enabled
+  set_fact:
+    coverage_enabled: false
+  when: coverage_enabled is undefined
+
+- name: ensure controller coverage directory is created with permissions
+  file:
+    path: "{{ coverage_logs_dir }}/controller/{{ item }}"
+    state: directory
+    mode: 0777
+  with_items:
+    - controller
+    - common
+  become: "{{ logs.dir.become }}"
+  when: coverage_enabled
+
+- name: extend controller volume for coverage
+  set_fact:
+    controller_volumes: "{{ controller_volumes|default({}) + [coverage_logs_dir+'/controller:/coverage']  }}"
+  when: coverage_enabled
+
 - name: include plugins
   include_tasks: "{{ item }}.yml"
   with_items: "{{ controller_plugins | default([]) }}"
+  when: not lean
+
+- name: lean controller setup
+  include_tasks: "lean.yml"
+  when: lean
 
 - name: (re)start controller
   docker_container:
     name: "{{ controller_name }}"
     image:
-      "{{docker_registry~docker.image.prefix}}/controller:{{docker.image.tag}}"
+      "{{docker_registry~docker.image.prefix}}/controller:{{ 'cov' if (coverage_enabled) else docker.image.tag }}"
     state: started
     recreate: true
     restart_policy: "{{ docker.restart.policy }}"
     hostname: "{{ controller_name }}"
     env: "{{ env }}"
-    volumes:
-      - "{{ whisk_logs_dir }}/{{ controller_name }}:/logs"
-      - "{{ controller.confdir }}/{{ controller_name }}:/conf"
+    volumes: "{{ controller_volumes }}"
     ports: "{{ ports_to_expose }}"
+    # userns_mode, pid_mode and privileged required when controller running in lean mode
+    userns_mode: "{{ userns_mode | default('') }}"
+    pid_mode: "{{ pid_mode | default('') }}"
+    privileged: "{{ privileged | default('no') }}"
     command:
       /bin/sh -c
       "exec /init.sh {{ controller_index }}
@@ -280,5 +323,3 @@
   until: result.status == 200
   retries: 12
   delay: 5
-
-# VIM: let b:syntastic_yaml_yamllint_args="-c '".expand('%:p:h')."../../../yamllint.yml'"

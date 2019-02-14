@@ -41,15 +41,13 @@ task copyBootJarToBin(type:Copy){
 
 bootJar {
     classifier = 'cli'
-    mainClassName = 'whisk.core.cli.Main'
+    mainClassName = 'org.apache.openwhisk.core.cli.Main'
     launchScript()
     finalizedBy copyBootJarToBin
 }
 
 dependencies {
     compile project(':common:scala')
-    compile 'org.rogach:scallop_2.11:3.1.2'
+    compile 'org.rogach:scallop_2.12:3.1.2'
     scoverage gradle.scoverage.deps
 }
-
-

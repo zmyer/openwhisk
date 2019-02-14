@@ -13,7 +13,6 @@
 # WSK_CLI="$OPENWHISK_HOME/bin/wsk"
 
 set -e
-set -x
 
 if [ $# -eq 0 ]
 then
@@ -42,6 +41,11 @@ if [ -f "$AUTH" ]; then
     AUTH=`cat $AUTH`
 fi
 
+if [ ! -f $WSK_CLI ]; then
+    echo $WSK_CLI is missing
+    exit 1
+fi
+
 export WSK_CONFIG_FILE= # override local property file to avoid namespace clashes
 
 echo Installing apimgmt package
@@ -52,9 +56,20 @@ $WSK_CLI -i --apihost "$APIHOST" package update --auth "$AUTH"  --shared no "$NA
 -p gwUrlV2 "$GW_HOST_V2"
 
 echo Creating NPM module .zip files
-zip -j "$OPENWHISK_HOME/core/routemgmt/getApi/getApi.zip" "$OPENWHISK_HOME/core/routemgmt/getApi/getApi.js" "$OPENWHISK_HOME/core/routemgmt/getApi/package.json" "$OPENWHISK_HOME/core/routemgmt/common/utils.js" "$OPENWHISK_HOME/core/routemgmt/common/apigw-utils.js"
-zip -j "$OPENWHISK_HOME/core/routemgmt/createApi/createApi.zip" "$OPENWHISK_HOME/core/routemgmt/createApi/createApi.js" "$OPENWHISK_HOME/core/routemgmt/createApi/package.json" "$OPENWHISK_HOME/core/routemgmt/common/utils.js" "$OPENWHISK_HOME/core/routemgmt/common/apigw-utils.js"
-zip -j "$OPENWHISK_HOME/core/routemgmt/deleteApi/deleteApi.zip" "$OPENWHISK_HOME/core/routemgmt/deleteApi/deleteApi.js" "$OPENWHISK_HOME/core/routemgmt/deleteApi/package.json" "$OPENWHISK_HOME/core/routemgmt/common/utils.js" "$OPENWHISK_HOME/core/routemgmt/common/apigw-utils.js"
+cd "$OPENWHISK_HOME/core/routemgmt/getApi"
+cp "$OPENWHISK_HOME/core/routemgmt/common"/*.js .
+npm install
+zip -r getApi.zip *
+
+cd "$OPENWHISK_HOME/core/routemgmt/createApi"
+cp "$OPENWHISK_HOME/core/routemgmt/common"/*.js .
+npm install
+zip -r createApi.zip *
+
+cd "$OPENWHISK_HOME/core/routemgmt/deleteApi"
+cp "$OPENWHISK_HOME/core/routemgmt/common"/*.js .
+npm install
+zip -r deleteApi.zip *
 
 echo Installing apimgmt actions
 $WSK_CLI -i --apihost "$APIHOST" action update --auth "$AUTH" "$NAMESPACE/apimgmt/getApi" "$OPENWHISK_HOME/core/routemgmt/getApi/getApi.zip" \

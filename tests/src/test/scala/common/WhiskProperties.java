@@ -32,6 +32,16 @@ import static org.junit.Assert.assertTrue;
 public class WhiskProperties {
 
     /**
+     * System property key which refers to OpenWhisk Edge Host url
+     */
+    private static final String WHISK_SERVER = "whisk.server";
+
+    /**
+     * System property key which refers to authentication key to be used for testing
+     */
+    private static final String WHISK_AUTH = "whisk.auth";
+
+    /**
      * The name of the properties file.
      */
     protected static final String WHISK_PROPS_FILE = "whisk.properties";
@@ -46,11 +56,6 @@ public class WhiskProperties {
      * components.
      */
     public static final boolean testRouter = System.getProperty("test.router", "false").equals("true");
-
-    /**
-     * The number of tests to run concurrently.
-     */
-    public static final int concurrentTestCount = getConcurrentTestCount(System.getProperty("testthreads", null));
 
     /**
      * The root of the whisk installation, used to retrieve files relative to
@@ -92,30 +97,28 @@ public class WhiskProperties {
 
         assertTrue("could not determine openwhisk home", wskdir != null);
 
-        File wskpropsFile = new File(wskdir, WHISK_PROPS_FILE);
-        assertTrue(String.format("'%s' does not exists but required", wskpropsFile), wskpropsFile.exists());
+        if (isWhiskPropertiesRequired()) {
+            File wskpropsFile = new File(wskdir, WHISK_PROPS_FILE);
+            assertTrue(String.format("'%s' does not exists but required", wskpropsFile), wskpropsFile.exists());
 
-        // loads properties from file
-        whiskProperties = loadProperties(wskpropsFile);
+            // loads properties from file
+            whiskProperties = loadProperties(wskpropsFile);
 
-        // set whisk home from read properties
-        whiskHome = whiskProperties.getProperty("openwhisk.home");
+            // set whisk home from read properties
+            whiskHome = whiskProperties.getProperty("openwhisk.home");
+        } else {
+            whiskProperties = new Properties();
+            whiskHome = wskdir;
+        }
 
         System.out.format("test router? %s\n", testRouter);
-    }
-
-    /**
-     * The path to the CLI directory.
-     */
-    public static String getCLIDir() {
-        return whiskHome + "/bin";
     }
 
     /**
      * The path to the Go CLI executable.
      */
     public static String getCLIPath() {
-        return getCLIDir() + "/wsk";
+        return whiskHome + "/bin/wsk";
     }
 
     public static File getFileRelativeToWhiskHome(String name) {
@@ -142,10 +145,6 @@ public class WhiskProperties {
         return whiskProperties.getProperty("main.docker.endpoint");
     }
 
-    public static boolean useCLIDownload() {
-        return whiskProperties.getProperty("use.cli.download").equals("true");
-    }
-
     public static String[] getInvokerHosts() {
         // split of empty string is non-empty array
         String hosts = whiskProperties.getProperty("invoker.hosts");
@@ -162,6 +161,10 @@ public class WhiskProperties {
         return getInvokerHosts().length;
     }
 
+    public static boolean isSSLCheckRelaxed() {
+        return Boolean.valueOf(getPropFromSystemOrEnv("whisk.ssl.relax"));
+    }
+
     public static String getSslCertificateChallenge() {
         return whiskProperties.getProperty("whisk.ssl.challenge");
     }
@@ -171,6 +174,10 @@ public class WhiskProperties {
      * host.
      */
     public static String getEdgeHost() {
+        String server = getPropFromSystemOrEnv(WHISK_SERVER);
+        if (server != null) {
+            return server;
+        }
         return testRouter ? getRouterHost() : whiskProperties.getProperty("edge.host");
     }
 
@@ -290,6 +297,17 @@ public class WhiskProperties {
     }
 
     /**
+     * Returns auth key to be used for testing
+     */
+    public static String getAuthKeyForTesting() {
+        String authKey = getPropFromSystemOrEnv(WHISK_AUTH);
+        if (authKey == null) {
+            authKey = readAuthKey(getAuthFileForTesting());
+        }
+        return authKey;
+    }
+
+    /**
      * @return the path to a file holding the VCAP_SERVICES used during junit
      *         testing
      */
@@ -318,6 +336,10 @@ public class WhiskProperties {
     public static boolean onLinux() {
         String osname = System.getProperty("os.name");
         return osname.equalsIgnoreCase("linux");
+    }
+
+    public static int getMaxActionSizeMB(){
+        return Integer.parseInt(getProperty("whisk.action.size.max", "10"));
     }
 
     /**
@@ -364,17 +386,27 @@ public class WhiskProperties {
         return props;
     }
 
-    private static int getConcurrentTestCount(String count) {
-        if (count != null && count.trim().isEmpty() == false) {
-            try {
-                int threads = Integer.parseInt(count);
-                if (threads > 0) {
-                    return threads;
-                }
-            } catch (NumberFormatException e) {
-            }
-        }
-        return DEFAULT_CONCURRENCY;
+    private static boolean isWhiskPropertiesRequired() {
+        return getPropFromSystemOrEnv(WHISK_SERVER) == null;
     }
 
+    private static String getProperty(String key, String defaultValue) {
+        String value = getPropFromSystemOrEnv(key);
+        if (value == null) {
+            value = whiskProperties.getProperty(key, defaultValue);
+        }
+        return value;
+    }
+
+    private static String getPropFromSystemOrEnv(String key) {
+        String value = System.getProperty(key);
+        if (value == null) {
+            value = System.getenv(toEnvName(key));
+        }
+        return value;
+    }
+
+    private static String toEnvName(String p) {
+        return p.replace('.', '_').toUpperCase();
+    }
 }

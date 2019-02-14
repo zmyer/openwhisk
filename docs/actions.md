@@ -44,6 +44,7 @@ advanced topics.
   * [Deleting actions](#deleting-actions)
 * [Accessing action metadata within the action body](#accessing-action-metadata-within-the-action-body)
 * [Securing your action](security.md)
+* [Concurrency in actions](concurrency.md)
 
 ## Languages and Runtimes
 
@@ -53,12 +54,15 @@ into a language-specific tutorial. If your preferred language isn't supported di
 the [Docker](actions-docker.md) action or [native binary](actions-docker.md#creating-native-actions)
 paths more suitable. Or, you can [create a new runtime](actions-new.md).
 
+* [Ballerina](actions-ballerina.md)
 * [Go](actions-go.md)
 * [Java](actions-java.md)
-* [JavaScript](actions-node.md)
+* [JavaScript](actions-nodejs.md)
 * [PHP](actions-php.md)
 * [Python](actions-python.md)
+* [Ruby](actions-ruby.md)
 * [Swift](actions-swift.md)
+* [.NET Core](actions-dotnet.md)
 * [Docker and native binaries](actions-docker.md)
 
 Multiple actions from different languages may be composed together to create a longer processing
@@ -174,7 +178,7 @@ wsk action invoke /whisk.system/samples/greeting
 ok: invoked /whisk.system/samples/greeting with id 5a64676ec8aa46b5a4676ec8aaf6b5d2
  ```
 
-To retrieve the activation record, you use the `wsk activations get <id>` command, as in:
+To retrieve the activation record, you use the `wsk activation get <id>` command, as in:
 ```
 wsk activation get 5a64676ec8aa46b5a4676ec8aaf6b5d2
 ok: got activation 5a64676ec8aa46b5a4676ec8aaf6b5d2
@@ -213,12 +217,16 @@ ok: invoked /whisk.system/samples/greeting with id 5975c24de0114ef2b5c24de0118ef
 ### Blocking invocations and timeouts
 
 A blocking invocation request will _wait_ for the activation result to be available. The wait period
-is the lesser of 60 seconds or the action's configured
+is the lesser of 60 seconds (this is the default for blocking invocations) or the action's configured
 [time limit](reference.md#per-action-timeout-ms-default-60s).
-The result of the activation is returned if it is available within the wait period.
+
+The result of the activation is returned if it is available within the blocking wait period.
 Otherwise, the activation continues processing in the system and an activation ID is returned
 so that one may check for the result later, as with non-blocking requests
 (see [here](#watching-action-output) for tips on monitoring activations).
+When an action exceeds its configured time limit, the activation record will indicate this error.
+See [understanding the activation record](#understanding-the-activation-record) for more details.
+
 
 ### Understanding the activation record
 
@@ -232,8 +240,12 @@ Each action invocation results in an activation record which contains the follow
 - `response`: A dictionary that defines the following keys
   - `status`: The activation result, which might be one of the following values:
     - *"success"*: the action invocation completed successfully.
-    - *"application error"*: the action invocation was successful, but the action returned an error value on purpose, for instance because a precondition on the arguments was not met.
-    - *"action developer error"*: the action was invoked, but it completed abnormally, for instance the action did not detect an exception, or a syntax error existed.
+    - *"application error"*: the action was invoked, but returned an error value on purpose, for instance because a precondition on the arguments was not met.
+    - *"action developer error"*: the action was invoked, but it completed abnormally, for instance the action did not detect an exception, or a syntax error existed. This status code is also returned under specific conditions such as:
+      - the action failed to initialize for any reason
+      - the action exceeded its time limit during the init or run phase
+      - the action specified a wrong docker container name
+      - the action did not properly implement the expected [runtime protocol](actions-new.md)
     - *"whisk internal error"*: the system was unable to invoke the action.
   - `success`: Is *true* if and only if the status is *"success"*.
   - `result`: A dictionary as a JSON object which contains the activation result. If the activation was successful, this contains the value that is returned by the action. If the activation was unsuccessful, `result` contains the `error` key, generally with an explanation of the failure.
@@ -268,7 +280,7 @@ ok: updated action greeting
 
 Sometimes it is necessary or just convenient to provide values for function parameters. These can serve as
 defaults, or as a way of reusing an action but with different parameters. Parameters can be bound to an action
-and unless overriden later by an invocation, they will provide the specified value to the function.
+and unless overridden later by an invocation, they will provide the specified value to the function.
 
 Here is an example.
 
@@ -289,7 +301,7 @@ wsk action invoke greeting --result
 }
 ```
 
-You may still provide additional parmaeters, as in the `place`:
+You may still provide additional parameters, as in the `place`:
 ```
 wsk action invoke greeting --result --param place Kansas
 {
@@ -308,7 +320,7 @@ wsk action invoke greeting --result --param place Kansas --param name Dorothy
 
 When an invocation request is received, the system records the request and dispatches an activation.
 
-The system returns an activation ID (in the case of a nonblocking invocation) to confirm that the invocation was received.
+The system returns an activation ID (in the case of a non-blocking invocation) to confirm that the invocation was received.
 Notice that if there's a network failure or other failure which intervenes before you receive an HTTP response, it is possible
 that OpenWhisk received and processed the request.
 
@@ -339,7 +351,7 @@ is skipped if an action is dispatched to a previously initialized container --- 
 You can tell if an [invocation was a warm activation or a cold one requiring initialization](annotations.md#annotations-specific-to-activations)
 by inspecting the activation record.
 - An action runs for a bounded amount of time. This limit can be configured per action, and applies to both the
-initialization and the execution separately.
+initialization and the execution separately. If the action time limit is exceeded during the initialization or run phase, the activation's response status is _action developer error_.
 - Functions should follow best practices to reduce [vulnerabilities](security.md) by treating input as untrusted,
 and be aware of vulnerabilities they may inherit from third-party dependencies.
 
